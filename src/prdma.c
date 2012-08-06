@@ -935,14 +935,11 @@ MPI_Send_init(void *buf, int count, MPI_Datatype datatype,
     int		tover;
     int		cc;
 
-    _PrdmaPrintf(stderr, "MPI_Send_init: invoked 1\n");
     cc = _PrdmaSendInit(&tover,
 			buf, count, datatype, dest, tag, comm, request);
     if (tover == 0) {
-	_PrdmaPrintf(stderr, "MPI_Send_init: invoked 2\n");
 	cc = PMPI_Send_init(buf, count, datatype, dest, tag, comm, request);
     }
-    _PrdmaPrintf(stderr, "MPI_Send_init: invoked 3\n");
     return cc;
 }
 
@@ -998,7 +995,6 @@ MPI_Recv_init(void *buf, int count, MPI_Datatype datatype,
     int		onecnt, rest, tcnt;
     int		cc;
 
-   _PrdmaPrintf(stderr, "MPI_Recv_init: invoked 1\n");
      /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
     transsize = dsize*count;
@@ -1039,12 +1035,9 @@ MPI_Recv_init(void *buf, int count, MPI_Datatype datatype,
 	rest -= tcnt;
     }
     *request = (MPI_Request) top->uid;
-   _PrdmaPrintf(stderr, "MPI_Recv_init: invoked 2\n");
     return MPI_SUCCESS;
 notake:
-   _PrdmaPrintf(stderr, "MPI_Recv_init: invoked 3\n");
     cc = PMPI_Recv_init(buf, count, datatype, source, tag, comm, request);
-   _PrdmaPrintf(stderr, "MPI_Recv_init: invoked 4\n");
     return cc;
 }
 
@@ -1377,13 +1370,10 @@ MPI_Request_c2f(MPI_Request request)
     PrdmaReq	*preq;
     MPI_Fint	val;
 
-    _PrdmaPrintf(stderr, "MPI_Request_c2f: invoked 1\n");
     reqid = (uint16_t) ((uint64_t)request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
-    _PrdmaPrintf(stderr, "MPI_Request_c2f: invoked 2 preq=%p\n", preq);
     if (preq == 0) {
 	val = PMPI_Request_c2f(request);
-	_PrdmaPrintf(stderr, "MPI_Request_c2f: invoked 3 val=%d\n", val);
 	return val;
     } else {
 	return (MPI_Fint) reqid;
@@ -1395,10 +1385,8 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
     uint16_t	reqid;
     PrdmaReq	*preq;
 
-    _PrdmaPrintf(stderr, "MPI_Request_f2c: invoked 1\n");
     reqid = (uint16_t) ((uint64_t)request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
-    _PrdmaPrintf(stderr, "MPI_Request_f2c: invoked 2 preq=%p\n", preq);
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
     } else {
