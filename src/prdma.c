@@ -51,8 +51,10 @@ typedef struct PrdmaMsgStat {
 int	_prdmaDebug;
 int	_prdmaStat;
 int	_prdmaNosync = 0;
+int	_prdmaNoTrunk;
 int	_prdmaVerbose;
 int	_prdmaWaitTag;
+int	_prdmaRdmaSize;
 int	_prdmaMTU = 1024*1024;
 
 static MPI_Comm		_prdmaInfoCom;
@@ -147,8 +149,8 @@ _prdmaErrorExit(int type)
     }
     MPI_Abort(MPI_COMM_WORLD, -type);
 }
-
 #ifdef	USE_PRDMA_MSGSTAT
+
 static void
 _PrdmaStatMessage(PrdmaReq *top)
 {
@@ -466,8 +468,10 @@ struct PrdmaOptions {
 static struct PrdmaOptions _poptions[] = {
     { "PRDMA_DEBUG", &_prdmaDebug },
     { "PRDMA_NOSYNC", &_prdmaNosync },
+    { "PRDMA_NOTRUNK", &_prdmaNoTrunk },
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
+    { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
     { 0, 0 }
 };
 
@@ -574,6 +578,7 @@ _PrdmaInit()
     _prdmaRequid = PRDMA_REQ_STARTUID;
     _prdmaNumReq = 0;
     memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+    _prdmaRdmaSize = PRDMA_SIZE;
     _PrdmaOptions();
 
     atexit(_PrdmaFinalize);
@@ -749,14 +754,18 @@ _PrdmaOneCount(int count, int dsize, size_t transsize)
 {
     int		onecnt;
 
-    if (transsize <= PRDMA_SIZE) {
+    if (transsize <= _prdmaRdmaSize) {
 	return 0;
     }
     /*onecnt = _prdmaMTU/dsize;*/
-    if (transsize < PRDMA_TRUNK_THR) {
+    if (_prdmaNoTrunk) {
 	onecnt = count;
     } else {
-	onecnt = count/PRDMA_N_NICS;
+	if (transsize < PRDMA_TRUNK_THR) {
+	    onecnt = count;
+	} else {
+	    onecnt = count/PRDMA_N_NICS;
+	}
     }
     return onecnt;
 }
