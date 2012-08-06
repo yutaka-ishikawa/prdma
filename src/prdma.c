@@ -35,11 +35,25 @@
 #define PRDMA_SIZE	13000
 #define PRDMA_TRUNK_THR	(1024*1024)
 #define PRDMA_N_NICS	4
+#ifdef	USE_PRDMA_MSGSTAT
+#define PRDMA_MSGSTAT_SIZE	1024
+#endif	/* USE_PRDMA_MSGSTAT */
 #include "prdma.h"
 
-int _prdmaNosync = 0;
-int _prdmaWaitTag;
-int _prdmaMTU = 1024*1024;
+#ifdef	USE_PRDMA_MSGSTAT
+typedef struct PrdmaMsgStat {
+    size_t	size;
+    int		count;
+    struct PrdmaMsgStat	*next;
+} PrdmaMsgStat;
+#endif	/* USE_PRDMA_MSGSTAT */
+
+int	_prdmaDebug;
+int	_prdmaStat;
+int	_prdmaNosync = 0;
+int	_prdmaVerbose;
+int	_prdmaWaitTag;
+int	_prdmaMTU = 1024*1024;
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -60,6 +74,10 @@ static int		_prdmaMyrank;
 uint64_t		_prdmaDmaThisSync;
 volatile uint64_t	*_prdmaRdmaSync;
 static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
+#ifdef	USE_PRDMA_MSGSTAT
+static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
+static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
+#endif	/* USE_PRDMA_MSGSTAT */
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
@@ -129,6 +147,36 @@ _prdmaErrorExit(int type)
     }
     MPI_Abort(MPI_COMM_WORLD, -type);
 }
+
+#ifdef	USE_PRDMA_MSGSTAT
+static void
+_PrdmaStatMessage(PrdmaReq *top)
+{
+    int		dsize;
+    size_t	transsize;
+    int		hent;
+    PrdmaMsgStat	*sp;
+
+    MPI_Type_size(top->dtype, &dsize);
+    transsize = dsize*top->count;
+    hent = transsize % PRDMA_MSGSTAT_SIZE;
+    for (sp = (top->type == PRDMA_RTYPE_SEND)
+	     ? &_prdmaSendstat[hent] : &_prdmaRecvstat[hent];
+	 sp; sp = sp->next) {
+	if (sp->size == 0) {
+	    sp->size = transsize;
+	    sp->count++;
+	    break;
+	} else if (sp->size == transsize) {
+	    sp->count++;
+	    break;
+	} else if (sp->next == 0) {
+	    sp->next = (PrdmaMsgStat*) malloc(sizeof(PrdmaMsgStat));
+	    memset(sp->next, 0, sizeof(PrdmaMsgStat));
+	}
+    }
+}
+#endif	/* USE_PRDMA_MSGSTAT */
 
 static int
 _PrdmaTagGet(PrdmaReq *pr)
@@ -410,10 +458,78 @@ PrdmaReserveRegion(void *addr, int size)
     return lbid;
 }
 
+struct PrdmaOptions {
+    char	*sym;
+    int		*var;
+};
+
+static struct PrdmaOptions _poptions[] = {
+    { "PRDMA_DEBUG", &_prdmaDebug },
+    { "PRDMA_NOSYNC", &_prdmaNosync },
+    { "PRDMA_VERBOSE", &_prdmaVerbose },
+    { "PRDMA_STATISTIC", &_prdmaStat },
+    { 0, 0 }
+};
+
+static void
+_PrdmaOptions()
+{
+    struct PrdmaOptions	*po;
+    char		*cp;
+
+    for (po = _poptions; po->sym; po++) {
+	cp = getenv(po->sym);
+	if (cp) {
+	    *po->var = atoi(cp);
+	}
+    }
+    if (_prdmaVerbose && _prdmaMyrank == 0) {
+	for (po = _poptions; po->sym; po++) {
+	    if (*po->var) {
+		_PrdmaPrintf(stderr, "%s is %d\n", po->sym, *po->var);
+	    } else {
+		_PrdmaPrintf(stderr, "%s is OFF\n", po->sym);
+	    }
+	}
+    }
+}
+
 static void
 _PrdmaFinalize()
 {
+    int		mintime, maxtime;
+
     if (_prdmaInitialized == 0) return;
+    if (_prdmaStat) {
+	MPI_Reduce((void*)&_prdmaWaitTag, (void*)&mintime, 1, MPI_INT,
+		   MPI_MIN, 0, MPI_COMM_WORLD);
+	MPI_Reduce((void*)&_prdmaWaitTag, (void*)&maxtime, 1, MPI_INT,
+		   MPI_MAX, 0, MPI_COMM_WORLD);
+	if (_prdmaMyrank == 0) {
+	    fprintf(stderr, "**********************************************\n");
+	    fprintf(stderr, "Max total waiting time to obtain tags: %d usec\n",
+		    maxtime);
+	    fprintf(stderr, "Min total waiting time to obtain tags: %d usec\n",
+		    mintime);
+	    fprintf(stderr, "**********************************************\n");
+	}
+#ifdef	USE_PRDMA_MSGSTAT
+	if (_prdmaMyrank < 8) {
+	    PrdmaMsgStat	*pm;
+	    int			i;
+	    for (i = 0; i < PRDMA_MSGSTAT_SIZE; i++) {
+		for (pm = &_prdmaSendstat[i]; pm; pm = pm->next) {
+		    if (pm->size > 0) {
+			fprintf(stderr, "[%d] send(%d) count(%d)\n",
+				_prdmaMyrank, pm->size, pm->count);
+		    }
+		}
+	    }
+	    fflush(stderr);
+	}
+#endif	/* USE_PRDMA_MSGSTAT */
+    }
+
     FJMPI_Rdma_finalize();
     _prdmaInitialized = 0;
 }
@@ -458,6 +574,7 @@ _PrdmaInit()
     _prdmaRequid = PRDMA_REQ_STARTUID;
     _prdmaNumReq = 0;
     memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+    _PrdmaOptions();
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -1023,6 +1140,11 @@ _PrdmaStart(PrdmaReq *top)
     PrdmaReq	*preq;
     int		cc = MPI_SUCCESS;
 
+#ifdef	USE_PRDMA_MSGSTAT
+    if (_prdmaStat) {
+	_PrdmaStatMessage(top);
+    }
+#endif	/* USE_PRDMA_MSGSTAT */
     for (preq = top; preq != NULL; preq = preq->trunks) {
 	cc = _PrdmaStart0(preq);
     }
