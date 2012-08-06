@@ -583,7 +583,6 @@ _PrdmaInit()
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
-
 }
 
 PrdmaReq	*
@@ -995,7 +994,7 @@ MPI_Recv_init(void *buf, int count, MPI_Datatype datatype,
     int		onecnt, rest, tcnt;
     int		cc;
 
-     /* Checking data transfer size */
+    /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
     transsize = dsize*count;
     onecnt = _PrdmaOneCount(count, dsize, transsize);
