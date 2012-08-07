@@ -51,6 +51,8 @@
 #define MOD_PRDMA_NIC_ORD_BYTYPE
 /* multi-request busy loop for synchronization */
 #define MOD_PRDMA_SYN_MBL
+/* busy loop for mpi_waitall() */
+#define MOD_PRDMA_BSY_WAIT
 
 #include "prdma.h"
 
@@ -767,7 +769,9 @@ retry:
 	/* Conidition of keeping polling
 	   (PRDMA_FIND_ALL && found < count) || (cond == PRDMA_FIND_SOME && found == 0)
 	   || (PRDMA_FIND_ANY && found == 0 */
+#ifndef	MOD_PRDMA_BSY_WAIT
 	usleep(1);
+#endif	/* MOD_PRDMA_BSY_WAIT */
 	goto retry;
     }
 ret:
