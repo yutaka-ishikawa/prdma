@@ -39,12 +39,16 @@
 #define PRDMA_MSGSTAT_SIZE	1024
 #endif	/* USE_PRDMA_MSGSTAT */
 
+/* interconnect nic selection */
 #define MOD_PRDMA_NIC_SEL
 /* #define MOD_PRDMA_NIC_SEL_CD00 */
 /* #define MOD_PRDMA_NIC_SEL_CD01 */
 /* #define MOD_PRDMA_NIC_SEL_CD02 */
 /* #define MOD_PRDMA_NIC_SEL_CD03 */
 #define MOD_PRDMA_NIC_SEL_CD04
+/* determine the order of nic usage */
+#define MOD_PRDMA_NIC_ORD
+#define MOD_PRDMA_NIC_ORD_BYTYPE
 
 #include "prdma.h"
 
@@ -1189,9 +1193,23 @@ _PrdmaStart(PrdmaReq *top)
 	_PrdmaStatMessage(top);
     }
 #endif	/* USE_PRDMA_MSGSTAT */
+#if	!defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE)
     for (preq = top; preq != NULL; preq = preq->trunks) {
 	cc = _PrdmaStart0(preq);
     }
+#else	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
+    for (preq = top; preq != NULL; preq = preq->trunks) {
+	if (preq->type == PRDMA_RTYPE_RECV) {
+	    cc = _PrdmaStart0(preq);
+	}
+    }
+    for (preq = top; preq != NULL; preq = preq->trunks) {
+	if (preq->type != PRDMA_RTYPE_RECV) {
+	    cc = _PrdmaStart0(preq);
+	}
+    }
+#endif	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
+
     return cc;
 }
 
@@ -1220,6 +1238,7 @@ MPI_Startall(int count, MPI_Request *reqs)
     int		i, ret;
     int		cc = MPI_SUCCESS;
 
+#if	!defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE)
     for (i = 0; i < count; i++) {
 	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
 	preq = _PrdmaReqFind(reqid);
@@ -1230,6 +1249,34 @@ MPI_Startall(int count, MPI_Request *reqs)
 	}
 	if (ret != MPI_SUCCESS) cc = ret;
     }
+#else	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
+    for (i = 0; i < count; i++) {
+	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
+	preq = _PrdmaReqFind(reqid);
+	if (preq == 0) { /* Regular Request */
+	    ret = PMPI_Start(&reqs[i]);
+	} else {
+	    if (preq->type != PRDMA_RTYPE_RECV) {
+		continue;
+	    }
+	    ret = _PrdmaStart(preq);
+	}
+	if (ret != MPI_SUCCESS) cc = ret;
+    }
+    for (i = 0; i < count; i++) {
+	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
+	preq = _PrdmaReqFind(reqid);
+	if (preq == 0) { /* Regular Request */
+	    continue;
+	} else {
+	    if (preq->type == PRDMA_RTYPE_RECV) {
+		continue;
+	    }
+	    ret = _PrdmaStart(preq);
+	}
+	if (ret != MPI_SUCCESS) cc = ret;
+    }
+#endif	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
     return cc;
 }
 
