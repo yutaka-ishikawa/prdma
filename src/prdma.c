@@ -38,6 +38,14 @@
 #ifdef	USE_PRDMA_MSGSTAT
 #define PRDMA_MSGSTAT_SIZE	1024
 #endif	/* USE_PRDMA_MSGSTAT */
+
+#define MOD_PRDMA_NIC_SEL
+/* #define MOD_PRDMA_NIC_SEL_CD00 */
+/* #define MOD_PRDMA_NIC_SEL_CD01 */
+/* #define MOD_PRDMA_NIC_SEL_CD02 */
+/* #define MOD_PRDMA_NIC_SEL_CD03 */
+#define MOD_PRDMA_NIC_SEL_CD04
+
 #include "prdma.h"
 
 #ifdef	USE_PRDMA_MSGSTAT
@@ -85,6 +93,7 @@ static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
      FJMPI_RDMA_NIC0,FJMPI_RDMA_NIC1,FJMPI_RDMA_NIC2,FJMPI_RDMA_NIC3
 };
+#ifndef	MOD_PRDMA_NIC_SEL
 static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
      FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
      FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
@@ -92,7 +101,11 @@ static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
      FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
 };
 static int	_prdmaDMAFent;
+#endif	/* MOD_PRDMA_NIC_SEL */
 static PrdmaReq	*_PrdmaCQpoll();
+#ifdef	MOD_PRDMA_NIC_SEL
+static void	_PrdmaNICinit(void);
+#endif	/* MOD_PRDMA_NIC_SEL */
 
 void
 _PrdmaPrintf(FILE *fp, const char *fmt, ...)
@@ -580,6 +593,9 @@ _PrdmaInit()
     memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
     _prdmaRdmaSize = PRDMA_SIZE;
     _PrdmaOptions();
+#ifdef	MOD_PRDMA_NIC_SEL
+    _PrdmaNICinit();
+#endif	/* MOD_PRDMA_NIC_SEL */
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -804,6 +820,11 @@ _PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
     preq->raddr = (uint64_t) -1;/* marker */
     preq->transff = 0;		/* for synchronization */
     preq->trunks = 0;		/* for divided data transfer if needed */
+#ifdef	MOD_PRDMA_NIC_SEL
+    if (_prdma_nic_init != NULL) {
+	(*_prdma_nic_init)(preq);
+    }
+#endif	/* MOD_PRDMA_NIC_SEL */
     return preq;
 }
 
@@ -835,6 +856,11 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
     if (flag) { 
 	/* The remote memid has been received */
 	preq->state = PRDMA_RSTATE_PREPARED;
+#ifdef	MOD_PRDMA_NIC_SEL
+	if (_prdma_nic_sync != NULL) {
+	    (*_prdma_nic_sync)(preq);
+	}
+#endif	/* MOD_PRDMA_NIC_SEL */
     } else {
 	preq->state = PRDMA_RSTATE_WAITRMEMID;
     }
@@ -965,6 +991,9 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
      */
     info._rbid = preq->lbid;
     info._rsync = preq->lsync;
+#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
+    info._rfidx = preq->fidx;
+#endif	/* MOD_PRDMA_NIC_SEL */
     MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE, source,
 	      preq->tag, _prdmaInfoCom);
     /*
@@ -976,6 +1005,11 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
     if (flag) {
 	/* The memid of the synchronization variable has been received */
 	preq->state = PRDMA_RSTATE_PREPARED;
+#ifdef	MOD_PRDMA_NIC_SEL
+	if (_prdma_nic_sync != NULL) {
+	    (*_prdma_nic_sync)(preq);
+	}
+#endif	/* MOD_PRDMA_NIC_SEL */
     } else {
 	preq->state = PRDMA_RSTATE_WAITRMEMID;
     }
@@ -1058,6 +1092,11 @@ _PrdmaStart0(PrdmaReq *preq)
 	 */
 	PMPI_Wait(&preq->negreq, &stat);
 	preq->state = PRDMA_RSTATE_PREPARED;
+#ifdef	MOD_PRDMA_NIC_SEL
+	if (_prdma_nic_sync != NULL) {
+	    (*_prdma_nic_sync)(preq);
+	}
+#endif	/* MOD_PRDMA_NIC_SEL */
     } else if (preq->state == PRDMA_RSTATE_DONE) {
 	/* restart */
 	preq->state = PRDMA_RSTATE_RESTART;
@@ -1066,11 +1105,15 @@ _PrdmaStart0(PrdmaReq *preq)
 	MPI_Abort(MPI_COMM_WORLD, -1);
 	return MPI_ERR_INTERN;
     }
+#ifndef	MOD_PRDMA_NIC_SEL
 /*
     flag = FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0;
 */
     flag = _prdmaDMAFlag[_prdmaDMAFent];
     _prdmaDMAFent = (_prdmaDMAFent + 1) % PRDMA_NIC_NPAT;
+#else	/* MOD_PRDMA_NIC_SEL */
+    flag = (*_prdma_nic_getf)(preq);
+#endif	/* MOD_PRDMA_NIC_SEL */
     switch (preq->type) {
     case PRDMA_RTYPE_SEND:
 	/* remote address */
@@ -1393,3 +1436,257 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
     }
 }
 
+#ifdef	MOD_PRDMA_NIC_SEL
+
+/*
+ * callback functions
+ */
+prdma_nic_cb_f   _prdma_nic_init = NULL;
+prdma_nic_cb_f   _prdma_nic_sync = NULL;
+prdma_nic_cb_f   _prdma_nic_getf = NULL;
+
+#if	defined(MOD_PRDMA_NIC_SEL_CD00)
+/*
+ * interconnect nic selection - Candidate 00
+ */
+static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
+     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
+};
+static int	_prdmaDMAFent;
+
+static int
+_Prdma_NIC_getf_cd00(PrdmaReq *preq)
+{
+    int flag;
+    flag = _prdmaDMAFlag[_prdmaDMAFent];
+    _prdmaDMAFent = (_prdmaDMAFent + 1) % PRDMA_NIC_NPAT;
+    return flag;
+}
+
+static void
+_PrdmaNICinit(void)
+{
+	_prdma_nic_init = NULL;
+	_prdma_nic_sync = NULL;
+	_prdma_nic_getf = _Prdma_NIC_getf_cd00;
+}
+
+#elif	defined(MOD_PRDMA_NIC_SEL_CD01)
+
+/*
+ * interconnect nic selection - Candidate 01
+ */
+static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
+     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
+};
+static int	_prdmaDMAFent_s;
+static int	_prdmaDMAFent_r;
+
+static int
+_Prdma_NIC_getf_cd01(PrdmaReq *preq)
+{
+    int flag;
+    if (preq->type == PRDMA_RTYPE_SEND) {
+	flag = _prdmaDMAFlag[_prdmaDMAFent_s];
+	_prdmaDMAFent_s = (_prdmaDMAFent_s + 1) % PRDMA_NIC_NPAT;
+    }
+    else {
+	flag = _prdmaDMAFlag[_prdmaDMAFent_r];
+	_prdmaDMAFent_r = (_prdmaDMAFent_r + 1) % PRDMA_NIC_NPAT;
+    }
+    return flag;
+}
+
+static void
+_PrdmaNICinit(void)
+{
+	_prdma_nic_init = NULL;
+	_prdma_nic_sync = NULL;
+	_prdma_nic_getf = _Prdma_NIC_getf_cd01;
+}
+
+#elif	defined(MOD_PRDMA_NIC_SEL_CD02)
+
+/*
+ * interconnect nic selection - Candidate 02
+ */
+static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
+     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
+};
+static int	_prdmaDMAFent_s;
+static int	_prdmaDMAFent_r;
+
+static int
+_Prdma_NIC_init_cd02(PrdmaReq *preq)
+{
+    if (preq->type == PRDMA_RTYPE_SEND) {
+	preq->fidx = _prdmaDMAFent_s;
+	_prdmaDMAFent_s = (_prdmaDMAFent_s + 1) % PRDMA_NIC_NPAT;
+    }
+    else {
+	preq->fidx = _prdmaDMAFent_r;
+	_prdmaDMAFent_r = (_prdmaDMAFent_r + 1) % PRDMA_NIC_NPAT;
+    }
+    return 0;
+}
+
+static int
+_Prdma_NIC_getf_cd02(PrdmaReq *preq)
+{
+    int flag;
+    flag = _prdmaDMAFlag[preq->fidx];
+    return flag;
+}
+
+static void
+_PrdmaNICinit(void)
+{
+	_prdma_nic_init = _Prdma_NIC_init_cd02;
+	_prdma_nic_sync = NULL;
+	_prdma_nic_getf = _Prdma_NIC_getf_cd02;
+}
+
+#elif	defined(MOD_PRDMA_NIC_SEL_CD03)
+
+/*
+ * interconnect nic selection - Candidate 03
+ */
+static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
+     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
+     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
+};
+
+static int
+_Prdma_NIC_init_cd03(PrdmaReq *preq)
+{
+    if (preq->peer == (_prdmaMyrank - 1)) {		/* West */
+        if (preq->type == PRDMA_RTYPE_SEND) {
+            preq->fidx = 0;
+        }
+        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
+            preq->fidx = 1;
+        }
+    }
+    else if (preq->peer == (_prdmaMyrank + 1)) {	/* East */
+        if (preq->type == PRDMA_RTYPE_SEND) {
+            preq->fidx = 1;
+        }
+        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
+            preq->fidx = 0;
+        }
+    }
+    else if (preq->peer < _prdmaMyrank) {		/* North */
+        if (preq->type == PRDMA_RTYPE_SEND) {
+            preq->fidx = 2;
+        }
+        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
+            preq->fidx = 3;
+        }
+    }
+    else /* if (preq->peer > _prdmaMyrank) */ {		/* South */
+        if (preq->type == PRDMA_RTYPE_SEND) {
+            preq->fidx = 3;
+        }
+        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
+            preq->fidx = 2;
+        }
+    }
+    return 0;
+}
+
+static int
+_Prdma_NIC_getf_cd03(PrdmaReq *preq)
+{
+    int flag;
+    flag = _prdmaDMAFlag[preq->fidx];
+    return flag;
+}
+
+static void
+_PrdmaNICinit(void)
+{
+	_prdma_nic_init = _Prdma_NIC_init_cd03;
+	_prdma_nic_sync = NULL;
+	_prdma_nic_getf = _Prdma_NIC_getf_cd03;
+}
+
+#elif	defined(MOD_PRDMA_NIC_SEL_CD04)
+
+/*
+ * interconnect nic selection - Candidate 04
+ */
+static int	_prdmaDMAFlag_local[PRDMA_NIC_NPAT] = {
+    FJMPI_RDMA_LOCAL_NIC0,
+    FJMPI_RDMA_LOCAL_NIC1,
+    FJMPI_RDMA_LOCAL_NIC2,
+    FJMPI_RDMA_LOCAL_NIC3
+};
+static int	_prdmaDMAFlag_remote[PRDMA_NIC_NPAT] = {
+    FJMPI_RDMA_REMOTE_NIC0,
+    FJMPI_RDMA_REMOTE_NIC1,
+    FJMPI_RDMA_REMOTE_NIC2,
+    FJMPI_RDMA_REMOTE_NIC3
+};
+static int	_prdmaDMAFent_s;
+static int	_prdmaDMAFent_r;
+
+static int
+_Prdma_NIC_init_cd04(PrdmaReq *preq)
+{
+    if (preq->type == PRDMA_RTYPE_SEND) {
+	preq->fidx = _prdmaDMAFent_s;
+	_prdmaDMAFent_s = (_prdmaDMAFent_s + 1) % PRDMA_NIC_NPAT;
+    }
+    else {
+	preq->fidx = _prdmaDMAFent_r;
+	_prdmaDMAFent_r = (_prdmaDMAFent_r + 1) % PRDMA_NIC_NPAT;
+    }
+    return 0;
+}
+
+static int
+_Prdma_NIC_sync_cd04(PrdmaReq *preq)
+{
+    if (preq->type == PRDMA_RTYPE_SEND) {
+	preq->flag =	_prdmaDMAFlag_local[preq->fidx]
+			| _prdmaDMAFlag_remote[preq->rfidx]
+			| FJMPI_RDMA_PATH0
+			;
+    }
+    else {
+	preq->flag =	_prdmaDMAFlag_local[preq->fidx]
+			| _prdmaDMAFlag_remote[preq->fidx]
+			| FJMPI_RDMA_PATH0
+			;
+    }
+    return 0;
+}
+
+static int
+_Prdma_NIC_getf_cd04(PrdmaReq *preq)
+{
+    return preq->flag;
+}
+
+static void
+_PrdmaNICinit(void)
+{
+	_prdma_nic_init = _Prdma_NIC_init_cd04;
+	_prdma_nic_sync = _Prdma_NIC_sync_cd04;
+	_prdma_nic_getf = _Prdma_NIC_getf_cd04;
+}
+
+#endif	/* defined(*) */
+
+#endif	/* MOD_PRDMA_NIC_SEL */

@@ -76,9 +76,15 @@ typedef struct PrdmaDmaRegion {
 struct recvinfo {
     int			_rbid;		/* memid of remote buf */
     int			_rsync;		/* index of synchronization */
+#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
+    int			_rfidx;		/* index of remote nic */
+#endif	/* MOD_PRDMA_NIC_SEL */
 };
 #define rbid	rinfo._rbid
 #define rsync	rinfo._rsync
+#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
+#define rfidx	rinfo._rfidx
+#endif	/* MOD_PRDMA_NIC_SEL */
 
 typedef struct PrdmaReq {
     struct PrdmaReq	*next;		/* link to the same hash key */
@@ -105,6 +111,10 @@ typedef struct PrdmaReq {
     int			tag;
     MPI_Comm		comm;
     MPI_Request		*req;
+#ifdef	MOD_PRDMA_NIC_SEL
+    int			fidx;
+    int			flag;
+#endif	/* MOD_PRDMA_NIC_SEL */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -168,3 +178,17 @@ typedef struct PrdmaReq {
     pq->req = rq;					\
 }
 
+#ifdef	MOD_PRDMA_NIC_SEL
+/*
+ * interconnect nic selection
+ */
+typedef int (*prdma_nic_cb_f)(PrdmaReq *preq);
+
+/*
+ * callback functions
+ */
+extern prdma_nic_cb_f	_prdma_nic_init;
+extern prdma_nic_cb_f	_prdma_nic_sync;
+extern prdma_nic_cb_f	_prdma_nic_getf;
+
+#endif	/* MOD_PRDMA_NIC_SEL */
