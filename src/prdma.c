@@ -49,6 +49,8 @@
 /* determine the order of nic usage */
 #define MOD_PRDMA_NIC_ORD
 #define MOD_PRDMA_NIC_ORD_BYTYPE
+/* multi-request busy loop for synchronization */
+#define MOD_PRDMA_SYN_MBL
 
 #include "prdma.h"
 
@@ -110,6 +112,9 @@ static PrdmaReq	*_PrdmaCQpoll();
 #ifdef	MOD_PRDMA_NIC_SEL
 static void	_PrdmaNICinit(void);
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifdef	MOD_PRDMA_SYN_MBL
+static void	_PrdmaSynMBLinit(void);
+#endif	/* MOD_PRDMA_SYN_MBL */
 
 void
 _PrdmaPrintf(FILE *fp, const char *fmt, ...)
@@ -600,6 +605,9 @@ _PrdmaInit()
 #ifdef	MOD_PRDMA_NIC_SEL
     _PrdmaNICinit();
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifdef	MOD_PRDMA_SYN_MBL
+    _PrdmaSynMBLinit();
+#endif	/* MOD_PRDMA_SYN_MBL */
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -1120,6 +1128,18 @@ _PrdmaStart0(PrdmaReq *preq)
 #endif	/* MOD_PRDMA_NIC_SEL */
     switch (preq->type) {
     case PRDMA_RTYPE_SEND:
+#ifdef	MOD_PRDMA_SYN_MBL
+	if (_prdma_syn_send != NULL) {
+	    /* remote address */
+	    if (preq->raddr == (uint64_t) -1) {
+		preq->raddr = FJMPI_Rdma_get_remote_addr(preq->peer, preq->rbid);
+	    }
+	    preq->transff ^= PRDMA_SYNC_FLIP;
+	    preq->sndst = 0; /* dosync */
+	    (*_prdma_syn_send)(preq);
+	    return MPI_SUCCESS;
+	}
+#endif	/* MOD_PRDMA_SYN_MBL */
 	/* remote address */
 	idx = preq->lsync;
 	if (preq->raddr == (uint64_t) -1) {
@@ -1227,6 +1247,11 @@ MPI_Start(MPI_Request *request)
     } else {
 	cc = _PrdmaStart(preq);
     }
+#ifdef	MOD_PRDMA_SYN_MBL
+    if (_prdma_syn_wait != NULL) {
+	(*_prdma_syn_wait)(1, request);
+    }
+#endif	/* MOD_PRDMA_SYN_MBL */
     return cc;
 }
 
@@ -1277,6 +1302,11 @@ MPI_Startall(int count, MPI_Request *reqs)
 	if (ret != MPI_SUCCESS) cc = ret;
     }
 #endif	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
+#ifdef	MOD_PRDMA_SYN_MBL
+    if (_prdma_syn_wait != NULL) {
+	(*_prdma_syn_wait)(count, reqs);
+    }
+#endif	/* MOD_PRDMA_SYN_MBL */
     return cc;
 }
 
@@ -1737,3 +1767,147 @@ _PrdmaNICinit(void)
 #endif	/* defined(*) */
 
 #endif	/* MOD_PRDMA_NIC_SEL */
+
+#ifdef	MOD_PRDMA_SYN_MBL
+
+/*
+ * multi-requst busy loop in synchronization
+ */
+#ifndef	MOD_PRDMA_NIC_SEL
+#error	"Need to define MOD_PRDMA_NIC_SEL"
+#endif	/* MOD_PRDMA_NIC_SEL */
+
+/*
+ * callback function hooks
+ */
+prdma_syn_cb_f   _prdma_syn_send = NULL;
+prdma_syn_wt_f   _prdma_syn_wait = NULL;
+
+static int
+_Prdma_Syn_send(PrdmaReq *preq)
+{
+    int		ret = 0;
+    int		cc1, cc2;
+    int		flag;
+    int		tag;
+    int		idx;
+    uint32_t	transid;
+    int		giveup, nloops;
+
+    if (
+	(preq->state == PRDMA_RSTATE_PREPARED)
+	|| (preq->state == PRDMA_RSTATE_RESTART)
+    ) {
+	/* */;
+    }
+    else if (
+	(preq->state == PRDMA_RSTATE_START)
+    ) {
+	ret = 1;
+	goto bad;
+    }
+    else {
+	_PrdmaPrintf(stderr, "Bad state %d\n", preq->state);
+	preq->state = PRDMA_RSTATE_ERROR;
+	ret = -1;
+	goto bad;
+    }
+    switch (preq->sndst) {
+    case 0: /* dosync */
+	if (_prdmaNosync == 0) {
+	    giveup = 50; /* XXX */
+	    nloops = 0;
+	    /* Synchronization */
+	    idx = preq->lsync;
+	    transid = _prdmaSyncConst[preq->transff + PRDMA_SYNC_CNSTFF_0];
+	    while (_prdmaSync[idx] != transid) {
+		if (nloops++ >= giveup) {
+		    goto bad; /* XXX is not an error */
+		}
+	    }
+	}
+	preq->sndst = 1; /* dosend */
+	break;
+    case 1: /* dosend */
+	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
+	/* start DMA */
+	tag = _PrdmaTagGet(preq);
+	cc1 = FJMPI_Rdma_put(preq->peer, tag,
+			     preq->raddr, preq->lbaddr,
+			     preq->size, flag);
+	/*
+	 * Make sure the ordering of the above transaction and the following
+	 * transaction
+	 */
+	tag = _PrdmaTagGet(preq);
+	cc2 = FJMPI_Rdma_put(preq->peer, tag,
+		_prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
+		sizeof(int), flag);
+	if (cc1 == 0 && cc2 == 0) {
+	    preq->state = PRDMA_RSTATE_START;
+	    ret = 1;
+	} else {
+	    _PrdmaPrintf(stderr,
+		    "FJMPI_Rdma_put error in the sender side (%d, %d)\n",
+		    cc1, cc2);
+	    preq->state = PRDMA_RSTATE_ERROR;
+	}
+	preq->sndst = 0; /* dosync */
+	break;
+    }
+bad:
+    return ret;
+}
+
+static int
+_Prdma_Syn_wait(int nreq, MPI_Request *reqs)
+{
+    int ir;
+    int doretry;
+
+retry:
+    doretry = 0;
+    for (ir = 0; ir < nreq; ir++) {
+	PrdmaReq	*head, *preq;
+	uint16_t	reqid;
+	
+	reqid = (uint16_t) ((uint64_t)reqs[ir]) & 0xffff;
+	head = _PrdmaReqFind(reqid);
+	if (head == 0) { /* Regular Request */
+	    continue;
+	}
+	for (preq = head; preq != NULL; preq = preq->trunks) {
+	    if (preq->type == PRDMA_RTYPE_RECV) {
+		continue;
+	    }
+	    if (
+		(preq->state == PRDMA_RSTATE_ERROR)
+		|| (preq->state == PRDMA_RSTATE_START)
+	    ) {
+		continue;
+	    }
+	    _Prdma_Syn_send(preq);
+	    if (preq->state == PRDMA_RSTATE_ERROR) {
+		continue;
+	    }
+	    if (preq->state != PRDMA_RSTATE_START) {
+		doretry++;
+	    }
+	}
+	
+    }
+    if (doretry > 0) {
+	goto retry;
+    }
+    return MPI_SUCCESS;
+}
+
+static void
+_PrdmaSynMBLinit(void)
+{
+	_prdma_syn_send = _Prdma_Syn_send;
+	_prdma_syn_wait = _Prdma_Syn_wait;
+}
+
+#endif	/* MOD_PRDMA_SYN_MBL */

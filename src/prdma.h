@@ -115,6 +115,9 @@ typedef struct PrdmaReq {
     int			fidx;
     int			flag;
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifdef	MOD_PRDMA_SYN_MBL
+    int			sndst;
+#endif	/* MOD_PRDMA_SYN_MBL */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -192,3 +195,18 @@ extern prdma_nic_cb_f	_prdma_nic_sync;
 extern prdma_nic_cb_f	_prdma_nic_getf;
 
 #endif	/* MOD_PRDMA_NIC_SEL */
+
+#ifdef	MOD_PRDMA_SYN_MBL
+/*
+ * synchronization by multi-request busy loop
+ */
+typedef int (*prdma_syn_cb_f)(PrdmaReq *preq);
+typedef int (*prdma_syn_wt_f)(int nreq, MPI_Request *reqs);
+
+/*
+ * callback functions
+ */
+extern prdma_syn_cb_f	_prdma_syn_send;
+extern prdma_syn_wt_f	_prdma_syn_wait;
+
+#endif	/* MOD_PRDMA_SYN_MBL */
