@@ -85,6 +85,11 @@ struct recvinfo {
 #if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
 #define rfidx	rinfo._rfidx
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifdef	MOD_PRDMA_TAG_GET
+/* tag for FJMPI_Rdma_put() */
+#define PRDMA_TAG_MAX		15
+#define PRDMA_TAG_START		1
+#endif	/* MOD_PRDMA_TAG_GET */
 
 typedef struct PrdmaReq {
     struct PrdmaReq	*next;		/* link to the same hash key */
@@ -118,6 +123,9 @@ typedef struct PrdmaReq {
 #ifdef	MOD_PRDMA_SYN_MBL
     int			sndst;
 #endif	/* MOD_PRDMA_SYN_MBL */
+#ifdef	MOD_PRDMA_TAG_GET
+    struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
+#endif	/* MOD_PRDMA_TAG_GET */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -127,8 +135,10 @@ typedef struct PrdmaReq {
 #define PRDMA_DMA_REGSSTART	(PRDMA_MEMID_SYNC + 1)
 #define PRDMA_DMA_HTABSIZE	512
 #define PRDMA_DMA_MAXSIZE	(16777216 - 4)	/* 2^24 - 4 */
+#ifndef	MOD_PRDMA_TAG_GET
 #define PRDMA_TAG_MAX		15
 #define PRDMA_TAG_START		1
+#endif	/* MOD_PRDMA_TAG_GET */
 
 #define PRDMA_REQ_HTABSIZE	1024
 #define PRDMA_REQ_STARTUID	10  /* uid must exclude MPI_REQUEST_NULL */

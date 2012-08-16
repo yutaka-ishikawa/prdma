@@ -53,6 +53,11 @@
 #define MOD_PRDMA_SYN_MBL
 /* busy loop for mpi_waitall() */
 #define MOD_PRDMA_BSY_WAIT
+/* extended get-tag */
+#define MOD_PRDMA_TAG_GET
+/* #define MOD_PRDMA_TAG_GET_CD00 */
+/* #define MOD_PRDMA_TAG_GET_CD01 */
+#define MOD_PRDMA_TAG_GET_CD02
 
 #include "prdma.h"
 
@@ -91,7 +96,9 @@ static int		_prdmaNprocs;
 static int		_prdmaMyrank;
 uint64_t		_prdmaDmaThisSync;
 volatile uint64_t	*_prdmaRdmaSync;
+#ifndef	MOD_PRDMA_TAG_GET
 static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
+#endif	/* MOD_PRDMA_TAG_GET */
 #ifdef	USE_PRDMA_MSGSTAT
 static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
 static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
@@ -203,6 +210,7 @@ _PrdmaStatMessage(PrdmaReq *top)
     }
 }
 #endif	/* USE_PRDMA_MSGSTAT */
+#ifndef	MOD_PRDMA_TAG_GET
 
 static int
 _PrdmaTagGet(PrdmaReq *pr)
@@ -241,6 +249,13 @@ _PrdmaTag2Req(int ent)
 {
     return _prdmaTagTab[ent];
 }
+#else	/* MOD_PRDMA_TAG_GET */
+
+static int	_PrdmaTagGet(PrdmaReq *pr);
+static void	_PrdmaTagFree(int nic, int tag /* ent */, int pid);
+static PrdmaReq	*_PrdmaTag2Req(int nic, int tag /* ent */, int pid);
+static void	_PrdmaTagInit(void);
+#endif	/* MOD_PRDMA_TAG_GET */
 
 static int
 _PrdmaGetmemid()
@@ -601,7 +616,11 @@ _PrdmaInit()
     memset(_prdmaDmaregs, 0, sizeof(_prdmaDmaregs));
     _prdmaRequid = PRDMA_REQ_STARTUID;
     _prdmaNumReq = 0;
+#ifndef	MOD_PRDMA_TAG_GET
     memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+#else	/* MOD_PRDMA_TAG_GET */
+    _PrdmaTagInit();
+#endif	/* MOD_PRDMA_TAG_GET */
     _prdmaRdmaSize = PRDMA_SIZE;
     _PrdmaOptions();
 #ifdef	MOD_PRDMA_NIC_SEL
@@ -627,7 +646,11 @@ _PrdmaCQpoll()
 	cc = FJMPI_Rdma_poll_cq(_prdmaNICID[i], &cq);
 	switch (cc) {
 	case FJMPI_RDMA_NOTICE:
+#ifndef	MOD_PRDMA_TAG_GET
 	    preq = _PrdmaTag2Req(cq.tag);
+#else	/* MOD_PRDMA_TAG_GET */
+	    preq = _PrdmaTag2Req(i /* nic */, cq.tag, cq.pid);
+#endif	/* MOD_PRDMA_TAG_GET */
 	    if (preq == 0) break;
 	    if (preq->type == PRDMA_RTYPE_SEND) {
 		if (preq->state == PRDMA_RSTATE_START) {
@@ -643,7 +666,11 @@ _PrdmaCQpoll()
 		    preq->state = PRDMA_RSTATE_RECEIVER_SYNC_SENT;
 		}
 	    }
+#ifndef	MOD_PRDMA_TAG_GET
 	    _PrdmaTagFree(cq.tag);
+#else	/* MOD_PRDMA_TAG_GET */
+	    _PrdmaTagFree(i /* nic */, cq.tag, cq.pid);
+#endif	/* MOD_PRDMA_TAG_GET */
 	    break;
 	case FJMPI_RDMA_REMOTE_NOTICE:
 	case 0:
@@ -1925,3 +1952,371 @@ _PrdmaSynMBLinit(void)
 }
 
 #endif	/* MOD_PRDMA_SYN_MBL */
+#ifdef	MOD_PRDMA_TAG_GET
+
+#if	defined(MOD_PRDMA_TAG_GET_CD00)
+/* variables */
+static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
+
+/* functions */
+static int
+_PrdmaTagGet(PrdmaReq *pr)
+{
+    int		i;
+    int		count = 0;
+
+retry:
+    count++;
+    for (i = PRDMA_TAG_START; i < PRDMA_TAG_MAX; i++) {
+	if (_prdmaTagTab[i] == 0) {
+	    _prdmaTagTab[i] = pr;
+	    return i;
+	}
+    }
+    /* no more tag */
+    _PrdmaCQpoll();
+    if (count < 10000) {
+	_prdmaWaitTag++;
+	usleep(1);
+	goto retry;
+    }
+    _PrdmaPrintf(stderr, "_PrdmaTagGet: no more tag\n");
+    PMPI_Abort(MPI_COMM_WORLD, -1);
+    return -1;
+}
+
+static void
+_PrdmaTagFree(int nic, int tag, int pid)
+{
+    _prdmaTagTab[tag] = 0;
+}
+
+static PrdmaReq	*
+_PrdmaTag2Req(int nic, int tag, int pid)
+{
+    return _prdmaTagTab[tag];
+}
+
+static void
+_PrdmaTagInit()
+{
+    memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+}
+#elif	defined(MOD_PRDMA_TAG_GET_CD01)
+/* variables */
+static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
+
+/* functions */
+static int
+_PrdmaTagGet(PrdmaReq *pr)
+{
+    int		ent, cent;
+    int		retries = 0;
+
+    ent = ((pr->fidx & 0x03) + 1) * ((pr->peer & 0x03) + 1);
+    if (ent >= PRDMA_TAG_MAX) {
+	ent = 0;
+    }
+retry:
+    retries++;
+    cent = ent;
+    do {
+	PrdmaReq *preq;
+	PrdmaReq **prev = &_prdmaTagTab[cent];
+	
+	while ((preq = *prev) != 0) {
+	    if (preq == pr) {
+		break;
+	    }
+	    if (
+		(preq->peer == pr->peer)
+		&& (preq->fidx == pr->fidx)
+	    ) {
+		break;
+	    }
+	    prev = &preq->tnxt[cent]; /* tag next */
+	}
+	if (preq == 0) {
+	    pr->tnxt[cnet] = 0;
+	    prev[0] = pr;
+	    return cent;
+	}
+	cent++;
+	if (cent >= PRDMA_TAG_MAX) {
+	    cent = 0;
+	}
+    } while (cent != ent);
+
+    /* no more tag */
+    _PrdmaCQpoll();
+    if (retries < 10000) {
+	_prdmaWaitTag++;
+	usleep(1);
+	goto retry;
+    }
+    _PrdmaPrintf(stderr, "_PrdmaTagGet: no more tag\n");
+    PMPI_Abort(MPI_COMM_WORLD, -1);
+    return -1;
+}
+
+static void
+_PrdmaTagFree(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, **found = 0;
+
+    prev = &_prdmaTagTab[tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    && (preq->fidx == nic)
+	) {
+#ifdef	notyet
+	    found = prev;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTagFree: duplicated\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = prev;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+    if (found != 0) {
+	preq = *found;
+	found[0] = preq->tnxt[tag];
+	preq->tnxt[tag] = 0;
+    }
+#ifndef	notyet
+    else {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: not found\n");
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    return ;
+}
+
+static PrdmaReq	*
+_PrdmaTag2Req(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, *found = 0;
+
+    prev = &_prdmaTagTab[tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    && (preq->fidx == nic)
+	) {
+#ifdef	notyet
+	    found = preq;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTag2Req: duplicated\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = preq;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+#ifndef	notyet
+    if (found == 0) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: not found\n");
+	/* PMPI_Abort(MPI_COMM_WORLD, -1); */
+    }
+#endif	/* notyet */
+    return found;
+}
+
+static void
+_PrdmaTagInit()
+{
+    memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+}
+#elif	defined(MOD_PRDMA_TAG_GET_CD02)
+/* variables */
+static PrdmaReq		*_prdmaTagTab[PRDMA_NIC_NPAT][PRDMA_TAG_MAX];
+
+/* functions */
+static int
+_PrdmaTagGet(PrdmaReq *pr)
+{
+    int		ent, tag, nic;
+    int		retries = 0;
+
+    nic = pr->fidx;
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagGet: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    ent =
+	  ((pr->peer & 0x0000000f) >>  0)
+	+ ((pr->peer & 0x000f0000) >> 16)
+	+ ((pr->peer & 0x0f000000) >> 24)
+	;
+    ent &= 0x0f;
+    if ((ent < 0) || (ent >= PRDMA_TAG_MAX)) {
+	ent = 0;
+    }
+retry:
+    retries++;
+    tag = ent;
+    do {
+	PrdmaReq *preq;
+	PrdmaReq **prev = &_prdmaTagTab[nic][tag];
+	
+	while ((preq = *prev) != 0) {
+	    if (preq == pr) {
+		break;
+	    }
+	    if (
+		(preq->peer == pr->peer)
+		/* && (preq->fidx == nic) */
+	    ) {
+		break;
+	    }
+	    prev = &preq->tnxt[tag]; /* tag next */
+	}
+	if (preq == 0) {
+#ifdef	notyet
+	    pr->tnxt[tag] = 0;
+#else	/* notyet */
+	    if (pr->tnxt[tag] != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTagGet: req busy\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+#endif	/* notyet */
+	    prev[0] = pr;
+	    return tag;
+	}
+	tag++;
+	if (tag >= PRDMA_TAG_MAX) {
+	    tag = 0;
+	}
+    } while (tag != ent);
+
+    /* no more tag */
+    _PrdmaCQpoll();
+    if (retries < 10000) {
+	_prdmaWaitTag++;
+	usleep(1);
+	goto retry;
+    }
+    _PrdmaPrintf(stderr, "_PrdmaTagGet: no more tag\n");
+    PMPI_Abort(MPI_COMM_WORLD, -1);
+    return -1;
+}
+
+static void
+_PrdmaTagFree(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, **found = 0;
+
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    if ((tag < 0) || (tag >= PRDMA_TAG_MAX)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: bad tag %d\n", tag);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    prev = &_prdmaTagTab[nic][tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    /* && (preq->fidx == nic) */
+	) {
+#ifdef	notyet
+	    found = prev;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTagFree: duplicated\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = prev;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+    if (found != 0) {
+	preq = found[0];
+	found[0] = preq->tnxt[tag];
+	preq->tnxt[tag] = 0;
+    }
+#ifndef	notyet
+    else {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: not found\n");
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    return ;
+}
+
+static PrdmaReq	*
+_PrdmaTag2Req(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, *found = 0;
+
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    if ((tag < 0) || (tag >= PRDMA_TAG_MAX)) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: bad tag %d\n", tag);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    prev = &_prdmaTagTab[nic][tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    /* && (preq->fidx == nic) */
+	) {
+#ifdef	notyet
+	    found = preq;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTag2Req: duplicated, "
+		"tag %d nic %d, "
+		"%c for %d with nic %d, "
+		"%c for %d with nic %d "
+		"\n",
+		tag, nic,
+		(found->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+			found->peer, found->fidx,
+		(preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+			preq->peer, preq->fidx
+		);
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = preq;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+#ifndef	notyet
+    if (found == 0) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: not found\n");
+	/* PMPI_Abort(MPI_COMM_WORLD, -1); */
+    }
+#endif	/* notyet */
+    return found;
+}
+
+static void
+_PrdmaTagInit()
+{
+    memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+}
+#endif	/* defined(MOD_PRDMA_TAG_GET_*) */
+
+#endif	/* MOD_PRDMA_TAG_GET */
