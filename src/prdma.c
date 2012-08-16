@@ -1891,6 +1891,16 @@ retry:
 	    ) {
 		continue;
 	    }
+	    /*
+	     * _Prdma_Syn_wait() -> _Prdma_Syn_send()
+	     *   -> _PrdmaTagGet() -> _PrdmaCQpoll()
+	     */
+	    if (
+		(preq->state == PRDMA_RSTATE_SENDER_SENT_DATA)
+		|| (preq->state == PRDMA_RSTATE_SENDER_SEND_DONE)
+	    ) {
+		continue;
+	    }
 	    _Prdma_Syn_send(preq);
 	    if (preq->state == PRDMA_RSTATE_ERROR) {
 		continue;
