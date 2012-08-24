@@ -62,6 +62,9 @@ typedef enum {
     PRDMA_RSTATE_DONE = 8,
     PRDMA_RSTATE_RESTART = 9,
     PRDMA_RSTATE_ERROR = -1
+#ifdef	MOD_PRDMA_LHP_TRC
+    , PRDMA_RSTATE_UNKNOWN = -2
+#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaRstate;
 
 /* offset is memid */
