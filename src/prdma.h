@@ -129,6 +129,9 @@ typedef struct PrdmaReq {
 #ifdef	MOD_PRDMA_TAG_GET
     struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
 #endif	/* MOD_PRDMA_TAG_GET */
+#ifdef	MOD_PRDMA_LHP_TRC
+    unsigned int	done;
+#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510

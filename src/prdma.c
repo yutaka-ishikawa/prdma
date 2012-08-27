@@ -731,6 +731,7 @@ retry:
 	preq->state = PRDMA_RSTATE_DONE;
 #else	/* MOD_PRDMA_LHP_TRC */
 	_PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	preq->done++;
 #endif	/* MOD_PRDMA_LHP_TRC */
 	cc = 1;
 	break;
@@ -753,6 +754,7 @@ retry:
 	    preq->state = PRDMA_RSTATE_DONE;
 #else	/* MOD_PRDMA_LHP_TRC */
 	    _PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	    preq->done++;
 #endif	/* MOD_PRDMA_LHP_TRC */
 	    cc = 1;
 	}
