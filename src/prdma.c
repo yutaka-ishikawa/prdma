@@ -2458,6 +2458,7 @@ _PrdmaTagInit()
  */
 prdma_trc_cb_f   _prdma_trc_init = NULL;
 prdma_trc_cb_f   _prdma_trc_fini = NULL;
+prdma_trc_pt_f   _prdma_trc_wlog = NULL;
 
 static void
 _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
@@ -2468,6 +2469,9 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
     }
     if (newsub >= 0) {
     }
+    if (_prdma_trc_wlog != NULL) {
+	(*_prdma_trc_wlog)(preq, line);
+    }
 }
 
 #ifdef	MOD_PRDMA_LHP_TRC_CD00
@@ -2475,19 +2479,29 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
 typedef struct PrdmaTrace {
     uint64_t		 time;
     PrdmaReq		*preq;
-    int			 name;	/* event name */
+    unsigned int	 line;
     unsigned int	 done;
 } PrdmaTrace;
 
 static PrdmaTrace	*_prdmaTrace = 0;
+static int		 _prdmaTraceIdx;
+static int		 _prdmaTraceMax;
 
 static int
 _Prdma_Trc_init_cd00(int tracesize)
 {
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
+    }
     if (tracesize > 0) {
 	size_t msiz;
 	msiz = sizeof (_prdmaTrace[0]) * tracesize;
 	_prdmaTrace = malloc(msiz);
+        if (_prdmaTrace != 0) {
+	    _prdmaTraceIdx = 0;
+	    _prdmaTraceMax = tracesize;
+	}
     }
     return (_prdmaTrace != 0)? 0: 1;
 }
@@ -2497,7 +2511,32 @@ _Prdma_Trc_fini_cd00(int tracesize)
 {
     if (_prdmaTrace != 0) {
 	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
     }
+    return 0;
+}
+
+static int
+_Prdma_Trc_wlog_cd00(PrdmaReq *preq, int line)
+{
+    PrdmaTrace *ptrc;
+    int ix;
+
+    if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
+	return -1;
+    }
+
+    if (_prdmaTraceIdx >= _prdmaTraceMax) {
+	_prdmaTraceIdx = 0;
+    }
+    ix = _prdmaTraceIdx++;
+
+    ptrc = &_prdmaTrace[ix];
+    ptrc->time = 0;
+    ptrc->preq = preq;
+    ptrc->line = line;
+    ptrc->done = preq->done;
+
     return 0;
 }
 
@@ -2506,6 +2545,7 @@ _PrdmaTrcinit(void)
 {
     _prdma_trc_init = _Prdma_Trc_init_cd00;
     _prdma_trc_fini = _Prdma_Trc_fini_cd00;
+    _prdma_trc_wlog = _Prdma_Trc_wlog_cd00;
     return ;
 }
 

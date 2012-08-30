@@ -232,11 +232,13 @@ extern prdma_syn_wt_f	_prdma_syn_wait;
  * light-weight and high precision trace
  */
 typedef int (*prdma_trc_cb_f)(int tracesize);
+typedef int (*prdma_trc_pt_f)(PrdmaReq *preq, int code);
 
 /*
  * callback functions
  */
 extern prdma_trc_cb_f	_prdma_trc_init;
 extern prdma_trc_cb_f	_prdma_trc_fini;
+extern prdma_trc_pt_f	_prdma_trc_wlog;
 
 #endif	/* MOD_PRDMA_LHP_TRC */
