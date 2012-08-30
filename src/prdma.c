@@ -60,6 +60,7 @@
 #define MOD_PRDMA_TAG_GET_CD02
 /* light-weight and high precision prdma-protocol trace */
 #define MOD_PRDMA_LHP_TRC
+#define MOD_PRDMA_LHP_TRC_CD00
 
 #include "prdma.h"
 
@@ -79,6 +80,9 @@ int	_prdmaVerbose;
 int	_prdmaWaitTag;
 int	_prdmaRdmaSize;
 int	_prdmaMTU = 1024*1024;
+#ifdef	MOD_PRDMA_LHP_TRC
+int	_prdmaTraceSize;
+#endif	/* MOD_PRDMA_LHP_TRC */
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -131,6 +135,7 @@ static void	_PrdmaChangeState_wrapped(PrdmaReq *preq,
 			PrdmaRstate new, int newsub, int line);
 #define _PrdmaChangeState(PREQ, NSTA, NSUB) \
 		_PrdmaChangeState_wrapped(PREQ, NSTA, NSUB, __LINE__)
+static void	_PrdmaTrcinit(void);
 #endif	/* MOD_PRDMA_LHP_TRC */
 
 void
@@ -523,6 +528,9 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
+#ifdef	MOD_PRDMA_LHP_TRC
+    { "PRDMA_TRACESIZE", &_prdmaTraceSize },
+#endif	/* MOD_PRDMA_LHP_TRC */
     { 0, 0 }
 };
 
@@ -584,6 +592,11 @@ _PrdmaFinalize()
 	}
 #endif	/* USE_PRDMA_MSGSTAT */
     }
+#ifdef	MOD_PRDMA_LHP_TRC
+    if (_prdma_trc_fini != NULL) {
+	(*_prdma_trc_fini)(_prdmaTraceSize);
+    }
+#endif	/* MOD_PRDMA_LHP_TRC */
 
     FJMPI_Rdma_finalize();
     _prdmaInitialized = 0;
@@ -634,6 +647,10 @@ _PrdmaInit()
     _PrdmaTagInit();
 #endif	/* MOD_PRDMA_TAG_GET */
     _prdmaRdmaSize = PRDMA_SIZE;
+#ifdef	MOD_PRDMA_LHP_TRC
+    _prdmaTraceSize = 0;
+    _PrdmaTrcinit();
+#endif	/* MOD_PRDMA_LHP_TRC */
     _PrdmaOptions();
 #ifdef	MOD_PRDMA_NIC_SEL
     _PrdmaNICinit();
@@ -641,6 +658,13 @@ _PrdmaInit()
 #ifdef	MOD_PRDMA_SYN_MBL
     _PrdmaSynMBLinit();
 #endif	/* MOD_PRDMA_SYN_MBL */
+#ifdef	MOD_PRDMA_LHP_TRC
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    (*_prdma_trc_init)(_prdmaTraceSize);
+	}
+    }
+#endif	/* MOD_PRDMA_LHP_TRC */
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -2426,6 +2450,15 @@ _PrdmaTagInit()
 
 #endif	/* MOD_PRDMA_TAG_GET */
 #ifdef	MOD_PRDMA_LHP_TRC
+/*
+ * Light-weight and High Precision Trace
+ */
+/*
+ * callback functions
+ */
+prdma_trc_cb_f   _prdma_trc_init = NULL;
+prdma_trc_cb_f   _prdma_trc_fini = NULL;
+
 static void
 _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
 {
@@ -2436,4 +2469,46 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
     if (newsub >= 0) {
     }
 }
+
+#ifdef	MOD_PRDMA_LHP_TRC_CD00
+
+typedef struct PrdmaTrace {
+    uint64_t		 time;
+    PrdmaReq		*preq;
+    int			 name;	/* event name */
+    unsigned int	 done;
+} PrdmaTrace;
+
+static PrdmaTrace	*_prdmaTrace = 0;
+
+static int
+_Prdma_Trc_init_cd00(int tracesize)
+{
+    if (tracesize > 0) {
+	size_t msiz;
+	msiz = sizeof (_prdmaTrace[0]) * tracesize;
+	_prdmaTrace = malloc(msiz);
+    }
+    return (_prdmaTrace != 0)? 0: 1;
+}
+
+static int
+_Prdma_Trc_fini_cd00(int tracesize)
+{
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+    }
+    return 0;
+}
+
+static void
+_PrdmaTrcinit(void)
+{
+    _prdma_trc_init = _Prdma_Trc_init_cd00;
+    _prdma_trc_fini = _Prdma_Trc_fini_cd00;
+    return ;
+}
+
+#endif	/* MOD_PRDMA_LHP_TRC_CD00 */
+
 #endif	/* MOD_PRDMA_LHP_TRC */
