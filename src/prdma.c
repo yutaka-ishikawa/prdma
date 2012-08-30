@@ -60,9 +60,13 @@
 #define MOD_PRDMA_TAG_GET_CD02
 /* light-weight and high precision prdma-protocol trace */
 #define MOD_PRDMA_LHP_TRC
+#define MOD_PRDMA_LHP_TRC_TIMESYNC
 #define MOD_PRDMA_LHP_TRC_CD00
 
 #include "prdma.h"
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+#include "timesync.h"
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #ifdef	USE_PRDMA_MSGSTAT
 typedef struct PrdmaMsgStat {
@@ -109,6 +113,9 @@ static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
 static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
 static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #endif	/* USE_PRDMA_MSGSTAT */
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
@@ -662,6 +669,9 @@ _PrdmaInit()
     if (_prdmaTraceSize > 0) {
 	if (_prdma_trc_init != NULL) {
 	    (*_prdma_trc_init)(_prdmaTraceSize);
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+	    timesync_sync(&_prdma_sl, &_prdma_sr);
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 	}
     }
 #endif	/* MOD_PRDMA_LHP_TRC */
@@ -1657,6 +1667,21 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
 	return (MPI_Request) request;
     }
 }
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+
+int
+MPI_Initialized(int *flag)
+{
+    int cc;
+    cc = PMPI_Initialized(flag);
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    timesync_sync(&_prdma_el, &_prdma_er);
+	}
+    }
+    return cc;
+}
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #ifdef	MOD_PRDMA_NIC_SEL
 
@@ -2532,7 +2557,11 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, int line)
     ix = _prdmaTraceIdx++;
 
     ptrc = &_prdmaTrace[ix];
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
     ptrc->time = 0;
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    ptrc->time = timesync_rdtsc();
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
     ptrc->preq = preq;
     ptrc->line = line;
     ptrc->done = preq->done;

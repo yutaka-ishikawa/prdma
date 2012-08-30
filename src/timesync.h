@@ -17,9 +17,17 @@
  */
 static inline uint64_t timesync_rdtsc(void)
 {
+#if	defined(__x86_64__)
+	uint32_t hi, lo;
+	asm volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+	return ( (uint64_t)lo) | (((uint64_t)hi) << 32);
+#elif	 defined(__GNUC__) && (defined(__sparcv9__) || defined(__sparc_v9__))
 	uint64_t rval;
 	asm volatile("rd %%tick,%0" : "=r"(rval));
 	return (rval);
+#else
+#error "unknown architecture for time stamp counter"
+#endif
 }
 
 static inline double timesync_conv(uint64_t sl, uint64_t sr, uint64_t el, uint64_t er, uint64_t lv)

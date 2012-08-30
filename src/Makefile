@@ -1,5 +1,5 @@
 MPICC	=	mpifccpx
-CFLAGS	= -DFJ_MPI -O3 -Wall
+CFLAGS	= -DFJ_MPI -O3 -Xg
 #MPICC	=	mpicc
 #CFLAGS	= -O3 -Wall -g
 RM	=	rm
