@@ -58,6 +58,8 @@
 /* #define MOD_PRDMA_TAG_GET_CD00 */
 /* #define MOD_PRDMA_TAG_GET_CD01 */
 #define MOD_PRDMA_TAG_GET_CD02
+/* MPI_Test() with no wait */
+#define MOD_PRDMA_TST_NWT
 /* light-weight and high precision prdma-protocol trace */
 #define MOD_PRDMA_LHP_TRC
 #define MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -795,7 +797,14 @@ retry:
     _PrdmaCQpoll();
     switch (preq->type) {
     case PRDMA_RTYPE_SEND:
+#ifndef	MOD_PRDMA_TST_NWT
 	if (preq->state != PRDMA_RSTATE_SENDER_SEND_DONE) goto retry;
+#else	/* MOD_PRDMA_TST_NWT */
+	if (preq->state != PRDMA_RSTATE_SENDER_SEND_DONE) {
+	    if (wait == 0) break;
+	    goto retry;
+	}
+#endif	/* MOD_PRDMA_TST_NWT */
 	/* send done */
 #ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_DONE;
