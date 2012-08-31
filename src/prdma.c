@@ -58,8 +58,15 @@
 /* #define MOD_PRDMA_TAG_GET_CD00 */
 /* #define MOD_PRDMA_TAG_GET_CD01 */
 #define MOD_PRDMA_TAG_GET_CD02
+/* light-weight and high precision prdma-protocol trace */
+#define MOD_PRDMA_LHP_TRC
+#define MOD_PRDMA_LHP_TRC_TIMESYNC
+#define MOD_PRDMA_LHP_TRC_CD00
 
 #include "prdma.h"
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+#include "timesync.h"
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #ifdef	USE_PRDMA_MSGSTAT
 typedef struct PrdmaMsgStat {
@@ -77,6 +84,9 @@ int	_prdmaVerbose;
 int	_prdmaWaitTag;
 int	_prdmaRdmaSize;
 int	_prdmaMTU = 1024*1024;
+#ifdef	MOD_PRDMA_LHP_TRC
+int	_prdmaTraceSize;
+#endif	/* MOD_PRDMA_LHP_TRC */
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -103,6 +113,9 @@ static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
 static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
 static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #endif	/* USE_PRDMA_MSGSTAT */
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
@@ -124,6 +137,13 @@ static void	_PrdmaNICinit(void);
 #ifdef	MOD_PRDMA_SYN_MBL
 static void	_PrdmaSynMBLinit(void);
 #endif	/* MOD_PRDMA_SYN_MBL */
+#ifdef	MOD_PRDMA_LHP_TRC
+static void	_PrdmaChangeState_wrapped(PrdmaReq *preq,
+			PrdmaRstate new, int newsub, int line);
+#define _PrdmaChangeState(PREQ, NSTA, NSUB) \
+		_PrdmaChangeState_wrapped(PREQ, NSTA, NSUB, __LINE__)
+static void	_PrdmaTrcinit(void);
+#endif	/* MOD_PRDMA_LHP_TRC */
 
 void
 _PrdmaPrintf(FILE *fp, const char *fmt, ...)
@@ -397,7 +417,11 @@ _PrdmaReqAlloc(PrdmaRtype type)
     }
     memset(pq, 0, sizeof(PrdmaReq));
     pq->type = type;
+#ifndef	MOD_PRDMA_LHP_TRC
     pq->state = PRDMA_RSTATE_INIT;
+#else	/* MOD_PRDMA_LHP_TRC */
+    _PrdmaChangeState(pq, PRDMA_RSTATE_INIT, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
     pq->uid = _PrdmaReqRegister(pq);
     return pq;
 }
@@ -411,6 +435,11 @@ _PrdmaReqfree(PrdmaReq *top)
 	_PrdmaReqUnregister(pq);
 	_PrdmaSyncFreeEntry(pq->lsync);
 	npq = pq->trunks;
+#ifdef	MOD_PRDMA_LHP_TRC
+	if (_prdma_trc_rlog != NULL) {
+	    (*_prdma_trc_rlog)(pq, __LINE__);
+	}
+#endif	/* MOD_PRDMA_LHP_TRC */
 	free(pq);
     }
 }
@@ -511,6 +540,9 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
+#ifdef	MOD_PRDMA_LHP_TRC
+    { "PRDMA_TRACESIZE", &_prdmaTraceSize },
+#endif	/* MOD_PRDMA_LHP_TRC */
     { 0, 0 }
 };
 
@@ -572,6 +604,11 @@ _PrdmaFinalize()
 	}
 #endif	/* USE_PRDMA_MSGSTAT */
     }
+#ifdef	MOD_PRDMA_LHP_TRC
+    if (_prdma_trc_fini != NULL) {
+	(*_prdma_trc_fini)(_prdmaTraceSize);
+    }
+#endif	/* MOD_PRDMA_LHP_TRC */
 
     FJMPI_Rdma_finalize();
     _prdmaInitialized = 0;
@@ -622,6 +659,10 @@ _PrdmaInit()
     _PrdmaTagInit();
 #endif	/* MOD_PRDMA_TAG_GET */
     _prdmaRdmaSize = PRDMA_SIZE;
+#ifdef	MOD_PRDMA_LHP_TRC
+    _prdmaTraceSize = 0;
+    _PrdmaTrcinit();
+#endif	/* MOD_PRDMA_LHP_TRC */
     _PrdmaOptions();
 #ifdef	MOD_PRDMA_NIC_SEL
     _PrdmaNICinit();
@@ -629,6 +670,16 @@ _PrdmaInit()
 #ifdef	MOD_PRDMA_SYN_MBL
     _PrdmaSynMBLinit();
 #endif	/* MOD_PRDMA_SYN_MBL */
+#ifdef	MOD_PRDMA_LHP_TRC
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    (*_prdma_trc_init)(_prdmaTraceSize);
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+	    timesync_sync(&_prdma_sl, &_prdma_sr);
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+	}
+    }
+#endif	/* MOD_PRDMA_LHP_TRC */
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -654,17 +705,38 @@ _PrdmaCQpoll()
 	    if (preq == 0) break;
 	    if (preq->type == PRDMA_RTYPE_SEND) {
 		if (preq->state == PRDMA_RSTATE_START) {
+#ifndef	MOD_PRDMA_LHP_TRC
 		    preq->state = PRDMA_RSTATE_SENDER_SENT_DATA;
+#else	/* MOD_PRDMA_LHP_TRC */
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SENT_DATA, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 		} else if (preq->state == PRDMA_RSTATE_SENDER_SENT_DATA) {
+#ifndef	MOD_PRDMA_LHP_TRC
 		    preq->state = PRDMA_RSTATE_SENDER_SEND_DONE;
+#else	/* MOD_PRDMA_LHP_TRC */
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SEND_DONE, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 		} else {
+#ifndef	MOD_PRDMA_LHP_TRC
 		    /* unknown state */
+#else	/* MOD_PRDMA_LHP_TRC */
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 		}
 	    } else {
 		/* receiver has sent sync entry to sender */
 		if (preq->state == PRDMA_RSTATE_START) {
+#ifndef	MOD_PRDMA_LHP_TRC
 		    preq->state = PRDMA_RSTATE_RECEIVER_SYNC_SENT;
+#else	/* MOD_PRDMA_LHP_TRC */
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_RECEIVER_SYNC_SENT, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 		}
+#ifdef	MOD_PRDMA_LHP_TRC
+		else {
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, -1);
+		}
+#endif	/* MOD_PRDMA_LHP_TRC */
 	    }
 #ifndef	MOD_PRDMA_TAG_GET
 	    _PrdmaTagFree(cq.tag);
@@ -694,7 +766,12 @@ retry:
     case PRDMA_RTYPE_SEND:
 	if (preq->state != PRDMA_RSTATE_SENDER_SEND_DONE) goto retry;
 	/* send done */
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_DONE;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	preq->done++;
+#endif	/* MOD_PRDMA_LHP_TRC */
 	cc = 1;
 	break;
     case PRDMA_RTYPE_RECV:
@@ -712,7 +789,12 @@ retry:
 	if (_prdmaSync[preq->lsync] == PRDMA_SYNC_MARKER) {
 	    /* reset the variable */
 	    _prdmaSync[preq->lsync] = PRDMA_SYNC_USED;
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_DONE;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	    preq->done++;
+#endif	/* MOD_PRDMA_LHP_TRC */
 	    cc = 1;
 	}
 	break;
@@ -898,14 +980,22 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) { 
 	/* The remote memid has been received */
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_PREPARED;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 #ifdef	MOD_PRDMA_NIC_SEL
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
 	}
 #endif	/* MOD_PRDMA_NIC_SEL */
     } else {
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_WAITRMEMID;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_WAITRMEMID, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
     }
     return preq;
 }
@@ -1047,14 +1137,22 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) {
 	/* The memid of the synchronization variable has been received */
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_PREPARED;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 #ifdef	MOD_PRDMA_NIC_SEL
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
 	}
 #endif	/* MOD_PRDMA_NIC_SEL */
     } else {
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_WAITRMEMID;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_WAITRMEMID, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
     }
     return preq;
 }
@@ -1134,7 +1232,11 @@ _PrdmaStart0(PrdmaReq *preq)
 	 * In case of receiver, snch variable index(rsync) has not arrive.
 	 */
 	PMPI_Wait(&preq->negreq, &stat);
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_PREPARED;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 #ifdef	MOD_PRDMA_NIC_SEL
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
@@ -1142,7 +1244,11 @@ _PrdmaStart0(PrdmaReq *preq)
 #endif	/* MOD_PRDMA_NIC_SEL */
     } else if (preq->state == PRDMA_RSTATE_DONE) {
 	/* restart */
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_RESTART;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_RESTART, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
     } else if (preq->state != PRDMA_RSTATE_PREPARED) {
 	_PrdmaPrintf(stderr, "MPI_Start is invoked before MPI_Wait\n");
 	MPI_Abort(MPI_COMM_WORLD, -1);
@@ -1185,6 +1291,9 @@ _PrdmaStart0(PrdmaReq *preq)
 	    }
 	}
 	/* start DMA */
+#ifdef	MOD_PRDMA_LHP_TRC
+	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	tag = _PrdmaTagGet(preq);
 	cc1 = FJMPI_Rdma_put(preq->peer, tag,
 			     preq->raddr, preq->lbaddr,
@@ -1199,18 +1308,30 @@ _PrdmaStart0(PrdmaReq *preq)
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_START;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	} else {
 	    _PrdmaPrintf(stderr,
 		    "FJMPI_Rdma_put error in the sender side (%d, %d)\n",
 		    cc1, cc2);
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_ERROR;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	}
 	break;
     case PRDMA_RTYPE_RECV:
 	preq->transff ^= PRDMA_SYNC_FLIP;
 	if (_prdmaNosync == 1) { /* no synchronization */
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_RECEIVER_SYNC_SENT;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_RECEIVER_SYNC_SENT, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	} else {
 	    /* Synchronization */
 	    tag = _PrdmaTagGet(preq);
@@ -1220,10 +1341,18 @@ _PrdmaStart0(PrdmaReq *preq)
 		 _prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
 	    if (cc1 == 0) {
+#ifndef	MOD_PRDMA_LHP_TRC
 		preq->state = PRDMA_RSTATE_START;
+#else	/* MOD_PRDMA_LHP_TRC */
+		_PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	    } else {
 		_PrdmaPrintf(stderr, "FJMPI_Rdma_put error in the receiver side\n");
+#ifndef	MOD_PRDMA_LHP_TRC
 		preq->state = PRDMA_RSTATE_ERROR;
+#else	/* MOD_PRDMA_LHP_TRC */
+		_PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	    }
 	}
 	break;
@@ -1543,6 +1672,21 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
 	return (MPI_Request) request;
     }
 }
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+
+int
+MPI_Initialized(int *flag)
+{
+    int cc;
+    cc = PMPI_Initialized(flag);
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    timesync_sync(&_prdma_el, &_prdma_er);
+	}
+    }
+    return cc;
+}
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
 
 #ifdef	MOD_PRDMA_NIC_SEL
 
@@ -1839,7 +1983,11 @@ _Prdma_Syn_send(PrdmaReq *preq)
     }
     else {
 	_PrdmaPrintf(stderr, "Bad state %d\n", preq->state);
+#ifndef	MOD_PRDMA_LHP_TRC
 	preq->state = PRDMA_RSTATE_ERROR;
+#else	/* MOD_PRDMA_LHP_TRC */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	ret = -1;
 	goto bad;
     }
@@ -1860,6 +2008,9 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	preq->sndst = 1; /* dosend */
 	break;
     case 1: /* dosend */
+#ifdef	MOD_PRDMA_LHP_TRC
+	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
 	tag = _PrdmaTagGet(preq);
@@ -1876,13 +2027,21 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_START;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	    ret = 1;
 	} else {
 	    _PrdmaPrintf(stderr,
 		    "FJMPI_Rdma_put error in the sender side (%d, %d)\n",
 		    cc1, cc2);
+#ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_ERROR;
+#else	/* MOD_PRDMA_LHP_TRC */
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
+#endif	/* MOD_PRDMA_LHP_TRC */
 	}
 	preq->sndst = 0; /* dosync */
 	break;
@@ -2320,3 +2479,151 @@ _PrdmaTagInit()
 #endif	/* defined(MOD_PRDMA_TAG_GET_*) */
 
 #endif	/* MOD_PRDMA_TAG_GET */
+#ifdef	MOD_PRDMA_LHP_TRC
+/*
+ * Light-weight and High Precision Trace
+ */
+/*
+ * callback functions
+ */
+prdma_trc_cb_f   _prdma_trc_init = NULL;
+prdma_trc_cb_f   _prdma_trc_fini = NULL;
+prdma_trc_pt_f   _prdma_trc_wlog = NULL;
+prdma_trc_pt_f   _prdma_trc_rlog = NULL;
+
+static void
+_PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
+{
+    /* PRDMA_RSTATE_UNKNOWN is information-only state */
+    if (new != PRDMA_RSTATE_UNKNOWN) {
+	preq->state = new;
+    }
+    if (newsub >= 0) {
+    }
+    if (_prdma_trc_wlog != NULL) {
+	(*_prdma_trc_wlog)(preq, line);
+    }
+}
+
+#ifdef	MOD_PRDMA_LHP_TRC_CD00
+
+typedef struct PrdmaTrace {
+    uint64_t		 time;
+    PrdmaReq		*preq;
+    unsigned int	 line;
+    unsigned int	 done;
+} PrdmaTrace;
+
+static PrdmaTrace	*_prdmaTrace = 0;
+static unsigned int	 _prdmaTraceIdx;
+static unsigned int	 _prdmaTraceMax;
+
+static int
+_Prdma_Trc_init_cd00(int tracesize)
+{
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
+    }
+    if (tracesize > 0) {
+	size_t msiz;
+	msiz = sizeof (_prdmaTrace[0]) * tracesize;
+	_prdmaTrace = malloc(msiz);
+        if (_prdmaTrace != 0) {
+	    _prdmaTraceIdx = 0;
+	    _prdmaTraceMax = tracesize;
+	}
+    }
+    return (_prdmaTrace != 0)? 0: 1;
+}
+
+static int
+_Prdma_Trc_fini_cd00(int tracesize)
+{
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
+    }
+    return 0;
+}
+
+static int
+_Prdma_Trc_wlog_cd00(PrdmaReq *preq, int line)
+{
+    PrdmaTrace *ptrc;
+    int ix;
+
+    if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
+	return -1;
+    }
+
+    if (_prdmaTraceIdx >= _prdmaTraceMax) {
+	_prdmaTraceIdx = 0;
+    }
+    ix = _prdmaTraceIdx++;
+
+    ptrc = &_prdmaTrace[ix];
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+    ptrc->time = 0;
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    ptrc->time = timesync_rdtsc();
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    ptrc->preq = preq;
+    ptrc->line = line;
+    ptrc->done = preq->done;
+
+    return 0;
+}
+
+static int
+_Prdma_Trc_rlog_cd00(PrdmaReq *preq, int line)
+{
+    int ix, ii;
+    double dv;
+
+    if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
+	return -1;
+    }
+
+    ii = ix = _prdmaTraceIdx;
+    if (ix == 0) {
+	ix = _prdmaTraceMax;
+    }
+    do {
+	if (ii >= _prdmaTraceMax) {
+	    ii = 0;
+	}
+	if (_prdmaTrace[ii].preq != preq) {
+	    continue;
+	}
+	dv = 0.0;
+#ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
+	if (_prdma_el != 0) {
+	    dv = timesync_conv(_prdma_sl, _prdma_sr,
+		_prdma_el, _prdma_er, _prdmaTrace[ii].time);
+	}
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+	printf("%14.9f evnt %4d rank %2d ruid %2d type  %c "
+	    "done %2d peer %2d flcl %2d frmt %2d\n",
+	    dv, _prdmaTrace[ii].line, _prdmaMyrank, preq->uid,
+	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+	    _prdmaTrace[ii].done, preq->peer,
+	    preq->fidx, preq->rfidx);
+    } while (++ii != ix);
+
+    return 0;
+}
+
+static void
+_PrdmaTrcinit(void)
+{
+    _prdma_trc_init = _Prdma_Trc_init_cd00;
+    _prdma_trc_fini = _Prdma_Trc_fini_cd00;
+    _prdma_trc_wlog = _Prdma_Trc_wlog_cd00;
+    _prdma_trc_rlog = _Prdma_Trc_rlog_cd00;
+    return ;
+}
+
+#endif	/* MOD_PRDMA_LHP_TRC_CD00 */
+
+#endif	/* MOD_PRDMA_LHP_TRC */

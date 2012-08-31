@@ -62,6 +62,9 @@ typedef enum {
     PRDMA_RSTATE_DONE = 8,
     PRDMA_RSTATE_RESTART = 9,
     PRDMA_RSTATE_ERROR = -1
+#ifdef	MOD_PRDMA_LHP_TRC
+    , PRDMA_RSTATE_UNKNOWN = -2
+#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaRstate;
 
 /* offset is memid */
@@ -126,6 +129,9 @@ typedef struct PrdmaReq {
 #ifdef	MOD_PRDMA_TAG_GET
     struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
 #endif	/* MOD_PRDMA_TAG_GET */
+#ifdef	MOD_PRDMA_LHP_TRC
+    unsigned int	done;
+#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -220,3 +226,20 @@ extern prdma_syn_cb_f	_prdma_syn_send;
 extern prdma_syn_wt_f	_prdma_syn_wait;
 
 #endif	/* MOD_PRDMA_SYN_MBL */
+
+#ifdef	MOD_PRDMA_LHP_TRC
+/*
+ * light-weight and high precision trace
+ */
+typedef int (*prdma_trc_cb_f)(int tracesize);
+typedef int (*prdma_trc_pt_f)(PrdmaReq *preq, int code);
+
+/*
+ * callback functions
+ */
+extern prdma_trc_cb_f	_prdma_trc_init;
+extern prdma_trc_cb_f	_prdma_trc_fini;
+extern prdma_trc_pt_f	_prdma_trc_wlog;
+extern prdma_trc_pt_f	_prdma_trc_rlog;
+
+#endif	/* MOD_PRDMA_LHP_TRC */
