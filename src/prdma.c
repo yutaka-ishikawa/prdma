@@ -64,6 +64,7 @@
 #define MOD_PRDMA_LHP_TRC_CD00
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
+#define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -118,6 +119,17 @@ static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#if	defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP)
+/*
+ * dummy MPI_Request structure for MPI_Request_f2c()
+ */
+struct dummy_mreq {
+     uint64_t	ul[16]; /* 128 Bytes */
+};
+#define DUMMY_REQUEST_COUNT	256
+static unsigned int	_prdma_mreqi = 0;
+static struct dummy_mreq	_prdma_mreqs[DUMMY_REQUEST_COUNT];
+#endif	/* defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP) */
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
@@ -459,7 +471,20 @@ _PrdmaReqFind(uint64_t id)
 
     /* This is only applicable for OpenMPI */
     if (id > 0xffff) { /* Original Request ID */
+#if	!defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP)
 	return NULL;
+#else	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
+	if (
+	    ((struct dummy_mreq *)id >= &_prdma_mreqs[0])
+	    && ((struct dummy_mreq *)id < &_prdma_mreqs[DUMMY_REQUEST_COUNT])
+	) {
+	    int *c_req = (int *)id;
+	    id = c_req[21]; /* c_req->req_f_to_c_index */
+	}
+	else {
+	    return NULL;
+	}
+#endif	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
     }
     uid = id;
     key = _PrdmaReqHashKey(uid);
@@ -1711,7 +1736,29 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
     } else {
+#if	!defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP)
 	return (MPI_Request) request;
+#else	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
+	int ir, *c_req;
+	
+	if (_prdma_mreqi >= DUMMY_REQUEST_COUNT) {
+	    _prdma_mreqi = 0;
+#ifdef	notdef
+	    _PrdmaPrintf(stderr, "[%03d] MPI_Request_c2f() : "
+		"dummy MPI_Request structure wrap around to zero.\n",
+		_prdmaMyrank);
+#endif	/* notdef */
+	}
+	ir = _prdma_mreqi++;
+	/*
+	 * openmpi-1.6.1/ompi/mpi/f77/wait_f.c :
+	 *   c_req->req_f_to_c_index
+	 *     offsetof(struct ompi_request_t, req_f_to_c_index) = 84
+	 */
+	c_req = (int *)&_prdma_mreqs[ir];
+	c_req[21] = (int)preq->uid; /* XXX magic number [84/4] */
+	return (MPI_Request)c_req;
+#endif	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
     }
 }
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
