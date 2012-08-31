@@ -883,7 +883,11 @@ retry:
     for (i = 0; i < count; i++) {
 	int	flag = 0;
 
+#ifndef	MOD_PRDMA_F2C_FIX
 	preq = _PrdmaReqFind((uint64_t) reqs[i]);
+#else	/* MOD_PRDMA_F2C_FIX */
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
+#endif	/* MOD_PRDMA_F2C_FIX */
 	if (preq == 0) {/* Regular Request */
 	    cc = PMPI_Test(&reqs[i], &flag, stats);
 	} else {
@@ -1531,7 +1535,11 @@ MPI_Wait(MPI_Request *request, MPI_Status *status)
     int		flag;
     int		cc;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     preq = _PrdmaReqFind((uint64_t) *request);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Wait(request, status);
@@ -1555,7 +1563,11 @@ MPI_Test(MPI_Request *request, int *flag, MPI_Status *status)
     int		cc;
     PrdmaReq	*preq;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     preq = _PrdmaReqFind((uint64_t) *request);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Test(request, flag, status);
@@ -1578,7 +1590,11 @@ MPI_Request_free(MPI_Request *request)
     PrdmaReq	*preq;
     int		cc;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     preq = _PrdmaReqFind((uint64_t) *request);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Request_free(request);
