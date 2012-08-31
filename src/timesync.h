@@ -1,5 +1,10 @@
 #ifndef	_TIMESYNC_H
 #define _TIMESYNC_H
+/*
+ * Persistent Communication based on RDMA
+ *   31/08/2012	Written by Massa. Hatanaaka
+ *		mhatanaka@riken.jp
+ */
 
 #include <stdio.h>
 #include <stdint.h>

@@ -2,6 +2,8 @@
  * Persistent Communication based on RDMA
  *   20/02/2012	Written by Yutaka Ishikawa
  *		ishikawa@is.s.u-tokyo.ac.jp, yutaka.ishikawa@riken.jp
+ *   31/08/2012	Written by Massa. Hatanaaka
+ *		mhatanaka@riken.jp
  */
 /*
  * _prdmaSync: lower 24 bits are used for sync index

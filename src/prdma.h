@@ -2,6 +2,8 @@
  * Persistent Communication based on RDMA
  *   20/02/2012	Written by Yutaka Ishikawa
  *		ishikawa@is.s.u-tokyo.ac.jp, yutaka.ishikawa@riken.jp
+ *   31/08/2012	Written by Massa. Hatanaka
+ *		mhatanaka@riken.jp
  */
 #include <stdio.h>
 #include <stdlib.h>
