@@ -240,5 +240,6 @@ typedef int (*prdma_trc_pt_f)(PrdmaReq *preq, int code);
 extern prdma_trc_cb_f	_prdma_trc_init;
 extern prdma_trc_cb_f	_prdma_trc_fini;
 extern prdma_trc_pt_f	_prdma_trc_wlog;
+extern prdma_trc_pt_f	_prdma_trc_rlog;
 
 #endif	/* MOD_PRDMA_LHP_TRC */
