@@ -31,8 +31,15 @@
  *	_prdmaync[lsync] <-----	_prdmaSync[lsync]
  * 
  */
+/* tune default pameters (environment variables) */
+#define MOD_PRDMA_TUN_PRM
+
 #define DEBUG_ON	1
+#ifndef	MOD_PRDMA_TUN_PRM
 #define PRDMA_SIZE	13000
+#else	/* MOD_PRDMA_TUN_PRM */
+#define PRDMA_SIZE	2048
+#endif	/* MOD_PRDMA_TUN_PRM */
 #define PRDMA_TRUNK_THR	(1024*1024)
 #define PRDMA_N_NICS	4
 #ifdef	USE_PRDMA_MSGSTAT
@@ -84,13 +91,25 @@ typedef struct PrdmaMsgStat {
 int	_prdmaDebug;
 int	_prdmaStat;
 int	_prdmaNosync = 0;
+#ifndef	MOD_PRDMA_TUN_PRM
 int	_prdmaNoTrunk;
+#else	/* MOD_PRDMA_TUN_PRM */
+int	_prdmaNoTrunk	= 1;
+#endif	/* MOD_PRDMA_TUN_PRM */
 int	_prdmaVerbose;
 int	_prdmaWaitTag;
+#ifndef	MOD_PRDMA_TUN_PRM
 int	_prdmaRdmaSize;
+#else	/* MOD_PRDMA_TUN_PRM */
+int	_prdmaRdmaSize	= PRDMA_SIZE;
+#endif	/* MOD_PRDMA_TUN_PRM */
 int	_prdmaMTU = 1024*1024;
 #ifdef	MOD_PRDMA_LHP_TRC
+#ifndef	MOD_PRDMA_TUN_PRM
 int	_prdmaTraceSize;
+#else	/* MOD_PRDMA_TUN_PRM */
+int	_prdmaTraceSize = 0;
+#endif	/* MOD_PRDMA_TUN_PRM */
 #endif	/* MOD_PRDMA_LHP_TRC */
 
 static MPI_Comm		_prdmaInfoCom;
@@ -691,9 +710,13 @@ _PrdmaInit()
 #else	/* MOD_PRDMA_TAG_GET */
     _PrdmaTagInit();
 #endif	/* MOD_PRDMA_TAG_GET */
+#ifndef	MOD_PRDMA_TUN_PRM
     _prdmaRdmaSize = PRDMA_SIZE;
+#endif	/* MOD_PRDMA_TUN_PRM */
 #ifdef	MOD_PRDMA_LHP_TRC
+#ifndef	MOD_PRDMA_TUN_PRM
     _prdmaTraceSize = 0;
+#endif	/* MOD_PRDMA_TUN_PRM */
     _PrdmaTrcinit();
 #endif	/* MOD_PRDMA_LHP_TRC */
     _PrdmaOptions();
@@ -938,9 +961,15 @@ _PrdmaOneCount(int count, int dsize, size_t transsize)
 {
     int		onecnt;
 
+#ifndef	MOD_PRDMA_TUN_PRM
     if (transsize <= _prdmaRdmaSize) {
 	return 0;
     }
+#else	/* MOD_PRDMA_TUN_PRM */
+    if (transsize < _prdmaRdmaSize) {
+	return 0;
+    }
+#endif	/* MOD_PRDMA_TUN_PRM */
     /*onecnt = _prdmaMTU/dsize;*/
     if (_prdmaNoTrunk) {
 	onecnt = count;
