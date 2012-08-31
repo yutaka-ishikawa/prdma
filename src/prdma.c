@@ -62,6 +62,9 @@
 #define MOD_PRDMA_LHP_TRC
 #define MOD_PRDMA_LHP_TRC_TIMESYNC
 #define MOD_PRDMA_LHP_TRC_CD00
+/* fix of MPI_Request_f2c() */
+#define MOD_PRDMA_F2C_FIX
+#define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -116,6 +119,17 @@ static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#if	defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP)
+/*
+ * dummy MPI_Request structure for MPI_Request_f2c()
+ */
+struct dummy_mreq {
+     uint64_t	ul[16]; /* 128 Bytes */
+};
+#define DUMMY_REQUEST_COUNT	256
+static unsigned int	_prdma_mreqi = 0;
+static struct dummy_mreq	_prdma_mreqs[DUMMY_REQUEST_COUNT];
+#endif	/* defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP) */
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
@@ -298,7 +312,11 @@ _PrdmaReqHashKey(uint32_t key)
 static int
 _PrdmaAddrHashKey(void *addr)
 {
+#ifndef	MOD_PRDMA_F2C_FIX
     int	key = ((uint64_t)addr >> 4) & 0xffffffff;
+#else	/* MOD_PRDMA_F2C_FIX */
+    int	key = ((uint64_t)(unsigned long)addr >> 4) & 0xffffffff;
+#endif	/* MOD_PRDMA_F2C_FIX */
     key = key & (PRDMA_DMA_HTABSIZE - 1);
     return key;
 }
@@ -453,7 +471,20 @@ _PrdmaReqFind(uint64_t id)
 
     /* This is only applicable for OpenMPI */
     if (id > 0xffff) { /* Original Request ID */
+#if	!defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP)
 	return NULL;
+#else	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
+	if (
+	    ((struct dummy_mreq *)id >= &_prdma_mreqs[0])
+	    && ((struct dummy_mreq *)id < &_prdma_mreqs[DUMMY_REQUEST_COUNT])
+	) {
+	    int *c_req = (int *)id;
+	    id = c_req[21]; /* c_req->req_f_to_c_index */
+	}
+	else {
+	    return NULL;
+	}
+#endif	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
     }
     uid = id;
     key = _PrdmaReqHashKey(uid);
@@ -1396,12 +1427,18 @@ _PrdmaStart(PrdmaReq *top)
 int
 MPI_Start(MPI_Request *request)
 {
+#ifndef	MOD_PRDMA_F2C_FIX
     uint16_t	reqid;
+#endif	/* MOD_PRDMA_F2C_FIX */
     PrdmaReq	*preq;
     int		cc;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     reqid = (uint16_t) ((uint64_t)*request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {/* Regular Request */
 	cc = PMPI_Start(request);
     } else {
@@ -1418,15 +1455,21 @@ MPI_Start(MPI_Request *request)
 int
 MPI_Startall(int count, MPI_Request *reqs)
 {
+#ifndef	MOD_PRDMA_F2C_FIX
     uint16_t	reqid;
+#endif	/* MOD_PRDMA_F2C_FIX */
     PrdmaReq	*preq;
     int		i, ret;
     int		cc = MPI_SUCCESS;
 
 #if	!defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE)
     for (i = 0; i < count; i++) {
+#ifndef	MOD_PRDMA_F2C_FIX
 	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
 	preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
+#endif	/* MOD_PRDMA_F2C_FIX */
 	if (preq == 0) { /* Regular Request */
 	    ret = PMPI_Start(&reqs[i]);
 	} else {
@@ -1436,8 +1479,12 @@ MPI_Startall(int count, MPI_Request *reqs)
     }
 #else	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
     for (i = 0; i < count; i++) {
+#ifndef	MOD_PRDMA_F2C_FIX
 	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
 	preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
+#endif	/* MOD_PRDMA_F2C_FIX */
 	if (preq == 0) { /* Regular Request */
 	    ret = PMPI_Start(&reqs[i]);
 	} else {
@@ -1449,8 +1496,12 @@ MPI_Startall(int count, MPI_Request *reqs)
 	if (ret != MPI_SUCCESS) cc = ret;
     }
     for (i = 0; i < count; i++) {
+#ifndef	MOD_PRDMA_F2C_FIX
 	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
 	preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
+#endif	/* MOD_PRDMA_F2C_FIX */
 	if (preq == 0) { /* Regular Request */
 	    continue;
 	} else {
@@ -1645,31 +1696,69 @@ MPI_Rsend_init(void *buf, int count, MPI_Datatype datatype,
 MPI_Fint
 MPI_Request_c2f(MPI_Request request)
 {
+#ifndef	MOD_PRDMA_F2C_FIX
     uint16_t	reqid;
+#endif	/* MOD_PRDMA_F2C_FIX */
     PrdmaReq	*preq;
     MPI_Fint	val;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     reqid = (uint16_t) ((uint64_t)request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	val = PMPI_Request_c2f(request);
 	return val;
     } else {
+#ifndef	MOD_PRDMA_F2C_FIX
 	return (MPI_Fint) reqid;
+#else	/* MOD_PRDMA_F2C_FIX */
+	return (MPI_Fint)(unsigned long)request;
+#endif	/* MOD_PRDMA_F2C_FIX */
     }
 }
 
 MPI_Request MPI_Request_f2c(MPI_Fint request)
 {
+#ifndef	MOD_PRDMA_F2C_FIX
     uint16_t	reqid;
+#endif	/* MOD_PRDMA_F2C_FIX */
     PrdmaReq	*preq;
 
+#ifndef	MOD_PRDMA_F2C_FIX
     reqid = (uint16_t) ((uint64_t)request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+    preq = _PrdmaReqFind((uint64_t)request);
+#endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
     } else {
+#if	!defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP)
 	return (MPI_Request) request;
+#else	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
+	int ir, *c_req;
+	
+	if (_prdma_mreqi >= DUMMY_REQUEST_COUNT) {
+	    _prdma_mreqi = 0;
+#ifdef	notdef
+	    _PrdmaPrintf(stderr, "[%03d] MPI_Request_c2f() : "
+		"dummy MPI_Request structure wrap around to zero.\n",
+		_prdmaMyrank);
+#endif	/* notdef */
+	}
+	ir = _prdma_mreqi++;
+	/*
+	 * openmpi-1.6.1/ompi/mpi/f77/wait_f.c :
+	 *   c_req->req_f_to_c_index
+	 *     offsetof(struct ompi_request_t, req_f_to_c_index) = 84
+	 */
+	c_req = (int *)&_prdma_mreqs[ir];
+	c_req[21] = (int)preq->uid; /* XXX magic number [84/4] */
+	return (MPI_Request)c_req;
+#endif	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
     }
 }
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -2060,10 +2149,16 @@ retry:
     doretry = 0;
     for (ir = 0; ir < nreq; ir++) {
 	PrdmaReq	*head, *preq;
+#ifndef	MOD_PRDMA_F2C_FIX
 	uint16_t	reqid;
+#endif	/* MOD_PRDMA_F2C_FIX */
 	
+#ifndef	MOD_PRDMA_F2C_FIX
 	reqid = (uint16_t) ((uint64_t)reqs[ir]) & 0xffff;
 	head = _PrdmaReqFind(reqid);
+#else	/* MOD_PRDMA_F2C_FIX */
+	head = _PrdmaReqFind((uint64_t)(unsigned long)reqs[ir]);
+#endif	/* MOD_PRDMA_F2C_FIX */
 	if (head == 0) { /* Regular Request */
 	    continue;
 	}
