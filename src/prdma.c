@@ -2515,8 +2515,8 @@ typedef struct PrdmaTrace {
 } PrdmaTrace;
 
 static PrdmaTrace	*_prdmaTrace = 0;
-static int		 _prdmaTraceIdx;
-static int		 _prdmaTraceMax;
+static unsigned int	 _prdmaTraceIdx;
+static unsigned int	 _prdmaTraceMax;
 
 static int
 _Prdma_Trc_init_cd00(int tracesize)
@@ -2586,6 +2586,9 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, int line)
     }
 
     ii = ix = _prdmaTraceIdx;
+    if (ix == 0) {
+	ix = _prdmaTraceMax;
+    }
     do {
 	if (ii >= _prdmaTraceMax) {
 	    ii = 0;
