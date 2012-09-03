@@ -68,6 +68,31 @@ typedef enum {
     , PRDMA_RSTATE_UNKNOWN = -2
 #endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaRstate;
+#ifdef	MOD_PRDMA_LHP_TRC
+#ifdef	MOD_PRDMA_LHP_TRC_PST
+
+typedef struct PrdmaRst2Str {
+    PrdmaRstate		sta;
+    const char		*str;
+} PrdmaRst2Str;
+/* state table */
+#define PRDMA_RST2STR_TBL	\
+{ \
+    { PRDMA_RSTATE_INIT,		"INIT"		}, \
+    { PRDMA_RSTATE_WAITRMEMID,		"WAITRMEMID"	}, \
+    { PRDMA_RSTATE_PREPARED,		"PREPARED"	}, \
+    { PRDMA_RSTATE_START,		"START"		}, \
+    { PRDMA_RSTATE_SENDER_SENT_DATA,	"SENT_DATA"	}, \
+    { PRDMA_RSTATE_SENDER_SEND_DONE,	"SEND_DONE"	}, \
+    { PRDMA_RSTATE_RECEIVER_SYNC_SENT,	"SYNC_SENT"	}, \
+    { PRDMA_RSTATE_DONE,		"DONE"		}, \
+    { PRDMA_RSTATE_RESTART,		"RESTART"	}, \
+    { PRDMA_RSTATE_ERROR,		"ERROR"		}, \
+    { PRDMA_RSTATE_UNKNOWN,		"unknown"	}, \
+    { PRDMA_RSTATE_UNKNOWN,		0		}  \
+}
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
+#endif	/* MOD_PRDMA_LHP_TRC */
 
 /* offset is memid */
 typedef struct PrdmaDmaRegion {
@@ -234,7 +259,12 @@ extern prdma_syn_wt_f	_prdma_syn_wait;
  * light-weight and high precision trace
  */
 typedef int (*prdma_trc_cb_f)(int tracesize);
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 typedef int (*prdma_trc_pt_f)(PrdmaReq *preq, int code);
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+typedef int (*prdma_trc_pt_f)(PrdmaReq *preq,
+		PrdmaRstate rsta, int ssta, int line);
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 
 /*
  * callback functions

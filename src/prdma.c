@@ -73,6 +73,7 @@
 #define MOD_PRDMA_LHP_TRC
 #define MOD_PRDMA_LHP_TRC_TIMESYNC
 #define MOD_PRDMA_LHP_TRC_CD00
+#define MOD_PRDMA_LHP_TRC_PST	/* print state */
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
 #define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
@@ -478,7 +479,11 @@ _PrdmaReqfree(PrdmaReq *top)
 	npq = pq->trunks;
 #ifdef	MOD_PRDMA_LHP_TRC
 	if (_prdma_trc_rlog != NULL) {
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 	    (*_prdma_trc_rlog)(pq, __LINE__);
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+	    (*_prdma_trc_rlog)(pq, PRDMA_RSTATE_UNKNOWN, 0, __LINE__);
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 	}
 #endif	/* MOD_PRDMA_LHP_TRC */
 	free(pq);
@@ -2652,7 +2657,11 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
     if (newsub >= 0) {
     }
     if (_prdma_trc_wlog != NULL) {
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 	(*_prdma_trc_wlog)(preq, line);
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+	(*_prdma_trc_wlog)(preq, new, newsub, line);
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
     }
 }
 
@@ -2661,13 +2670,23 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
 typedef struct PrdmaTrace {
     uint64_t		 time;
     PrdmaReq		*preq;
+#ifndef	MOD_PRDMA_LHP_TRC_PST
     unsigned int	 line;
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+    char                 rsta;
+    char                 ssta;
+    unsigned short	 line;
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
     unsigned int	 done;
 } PrdmaTrace;
 
 static PrdmaTrace	*_prdmaTrace = 0;
 static unsigned int	 _prdmaTraceIdx;
 static unsigned int	 _prdmaTraceMax;
+#ifdef	MOD_PRDMA_LHP_TRC_PST
+
+static int	_Prdma_Trc_Rst2Str(PrdmaTrace *trc, char *bp, size_t bz);
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 
 static int
 _Prdma_Trc_init_cd00(int tracesize)
@@ -2699,7 +2718,11 @@ _Prdma_Trc_fini_cd00(int tracesize)
 }
 
 static int
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 _Prdma_Trc_wlog_cd00(PrdmaReq *preq, int line)
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+_Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 {
     PrdmaTrace *ptrc;
     int ix;
@@ -2720,17 +2743,30 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, int line)
     ptrc->time = timesync_rdtsc();
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
     ptrc->preq = preq;
+#ifndef	MOD_PRDMA_LHP_TRC_PST
     ptrc->line = line;
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+    ptrc->rsta = (char) rsta;
+    ptrc->ssta = (char) ssta;
+    ptrc->line = (unsigned short)line;
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
     ptrc->done = preq->done;
 
     return 0;
 }
 
 static int
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 _Prdma_Trc_rlog_cd00(PrdmaReq *preq, int line)
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+_Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 {
     int ix, ii;
     double dv;
+#ifdef	MOD_PRDMA_LHP_TRC_PST
+    char buf[18];
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 
     if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
 	return -1;
@@ -2748,18 +2784,31 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, int line)
 	    continue;
 	}
 	dv = 0.0;
+#ifdef	MOD_PRDMA_LHP_TRC_PST
+	buf[0] = '\0';
+	_Prdma_Trc_Rst2Str(&_prdmaTrace[ii], buf, sizeof (buf));
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 	if (_prdma_el != 0) {
 	    dv = timesync_conv(_prdma_sl, _prdma_sr,
 		_prdma_el, _prdma_er, _prdmaTrace[ii].time);
 	}
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#ifndef	MOD_PRDMA_LHP_TRC_PST
 	printf("%14.9f evnt %4d rank %2d ruid %2d type  %c "
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, _prdmaTrace[ii].line, _prdmaMyrank, preq->uid,
 	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
 	    _prdmaTrace[ii].done, preq->peer,
 	    preq->fidx, preq->rfidx);
+#else	/* MOD_PRDMA_LHP_TRC_PST */
+	printf("%14.9f evnt %-17s rank %2d ruid %2d type  %c "
+	    "done %2d peer %2d flcl %2d frmt %2d\n",
+	    dv, buf, _prdmaMyrank, preq->uid,
+	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+	    _prdmaTrace[ii].done, preq->peer,
+	    preq->fidx, preq->rfidx);
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
     } while (++ii != ix);
 
     return 0;
@@ -2774,6 +2823,42 @@ _PrdmaTrcinit(void)
     _prdma_trc_rlog = _Prdma_Trc_rlog_cd00;
     return ;
 }
+#ifdef	MOD_PRDMA_LHP_TRC_PST
+
+static PrdmaRst2Str	_prdmaRst2str[] = PRDMA_RST2STR_TBL;
+
+static int
+_Prdma_Trc_Rst2Str(PrdmaTrace *trc, char *bp, size_t bz)
+{
+    int		cc;
+    const char	*cp;
+
+    if ((trc == 0) || (bp == 0) || (bz <= 0)) {
+       return -1;
+    }
+    cp = "(null)";
+    if (trc->rsta == PRDMA_RSTATE_UNKNOWN) {
+	if (trc->ssta == 1 /* dosend */) {
+	    cp = "dosend";
+	}
+	else {
+	    cp = "(unknown)";
+	}
+    }
+    else {
+	int ii = 0;
+	while (_prdmaRst2str[ii].str != 0) {
+	    if (_prdmaRst2str[ii].sta == (PrdmaRstate)trc->rsta) {
+		cp = _prdmaRst2str[ii].str;
+		break;
+	    }
+	    ii++;
+	}
+    }
+    cc = snprintf(bp, bz, "%s,%d", cp, trc->line);
+    return cc;
+}
+#endif	/* MOD_PRDMA_LHP_TRC_PST */
 
 #endif	/* MOD_PRDMA_LHP_TRC_CD00 */
 
