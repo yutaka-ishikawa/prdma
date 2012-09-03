@@ -77,11 +77,16 @@
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
 #define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
+/* release information */
+#define MOD_PRDMA_REL_INF
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 #include "timesync.h"
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#ifdef	MOD_PRDMA_REL_INF
+#include "version.h"
+#endif	/* MOD_PRDMA_REL_INF */
 
 #ifdef	USE_PRDMA_MSGSTAT
 typedef struct PrdmaMsgStat {
@@ -618,6 +623,9 @@ _PrdmaOptions()
 	}
     }
     if (_prdmaVerbose && _prdmaMyrank == 0) {
+#ifdef	MOD_PRDMA_REL_INF
+	_PrdmaPrintf(stderr, "Version prdma-%s\n", PRDMA_VERSION_STRING);
+#endif	/* MOD_PRDMA_REL_INF */
 	for (po = _poptions; po->sym; po++) {
 	    if (*po->var) {
 		_PrdmaPrintf(stderr, "%s is %d\n", po->sym, *po->var);
