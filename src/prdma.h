@@ -2,6 +2,8 @@
  * Persistent Communication based on RDMA
  *   20/02/2012	Written by Yutaka Ishikawa
  *		ishikawa@is.s.u-tokyo.ac.jp, yutaka.ishikawa@riken.jp
+ *   31/08/2012	Written by Massa. Hatanaka
+ *		mhatanaka@riken.jp
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +64,29 @@ typedef enum {
     PRDMA_RSTATE_DONE = 8,
     PRDMA_RSTATE_RESTART = 9,
     PRDMA_RSTATE_ERROR = -1
+    , PRDMA_RSTATE_UNKNOWN = -2
 } PrdmaRstate;
+
+typedef struct PrdmaRst2Str {
+    PrdmaRstate		sta;
+    const char		*str;
+} PrdmaRst2Str;
+/* state table */
+#define PRDMA_RST2STR_TBL	\
+{ \
+    { PRDMA_RSTATE_INIT,		"INIT"		}, \
+    { PRDMA_RSTATE_WAITRMEMID,		"WAITRMEMID"	}, \
+    { PRDMA_RSTATE_PREPARED,		"PREPARED"	}, \
+    { PRDMA_RSTATE_START,		"START"		}, \
+    { PRDMA_RSTATE_SENDER_SENT_DATA,	"SENT_DATA"	}, \
+    { PRDMA_RSTATE_SENDER_SEND_DONE,	"SEND_DONE"	}, \
+    { PRDMA_RSTATE_RECEIVER_SYNC_SENT,	"SYNC_SENT"	}, \
+    { PRDMA_RSTATE_DONE,		"DONE"		}, \
+    { PRDMA_RSTATE_RESTART,		"RESTART"	}, \
+    { PRDMA_RSTATE_ERROR,		"ERROR"		}, \
+    { PRDMA_RSTATE_UNKNOWN,		"unknown"	}, \
+    { PRDMA_RSTATE_UNKNOWN,		0		}  \
+}
 
 /* offset is memid */
 typedef struct PrdmaDmaRegion {
@@ -76,15 +100,14 @@ typedef struct PrdmaDmaRegion {
 struct recvinfo {
     int			_rbid;		/* memid of remote buf */
     int			_rsync;		/* index of synchronization */
-#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
     int			_rfidx;		/* index of remote nic */
-#endif	/* MOD_PRDMA_NIC_SEL */
 };
 #define rbid	rinfo._rbid
 #define rsync	rinfo._rsync
-#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
 #define rfidx	rinfo._rfidx
-#endif	/* MOD_PRDMA_NIC_SEL */
+/* tag for FJMPI_Rdma_put() */
+#define PRDMA_TAG_MAX		15
+#define PRDMA_TAG_START		1
 
 typedef struct PrdmaReq {
     struct PrdmaReq	*next;		/* link to the same hash key */
@@ -111,13 +134,11 @@ typedef struct PrdmaReq {
     int			tag;
     MPI_Comm		comm;
     MPI_Request		*req;
-#ifdef	MOD_PRDMA_NIC_SEL
     int			fidx;
     int			flag;
-#endif	/* MOD_PRDMA_NIC_SEL */
-#ifdef	MOD_PRDMA_SYN_MBL
     int			sndst;
-#endif	/* MOD_PRDMA_SYN_MBL */
+    struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
+    unsigned int	done;
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -127,8 +148,6 @@ typedef struct PrdmaReq {
 #define PRDMA_DMA_REGSSTART	(PRDMA_MEMID_SYNC + 1)
 #define PRDMA_DMA_HTABSIZE	512
 #define PRDMA_DMA_MAXSIZE	(16777216 - 4)	/* 2^24 - 4 */
-#define PRDMA_TAG_MAX		15
-#define PRDMA_TAG_START		1
 
 #define PRDMA_REQ_HTABSIZE	1024
 #define PRDMA_REQ_STARTUID	10  /* uid must exclude MPI_REQUEST_NULL */
@@ -181,7 +200,6 @@ typedef struct PrdmaReq {
     pq->req = rq;					\
 }
 
-#ifdef	MOD_PRDMA_NIC_SEL
 /*
  * interconnect nic selection
  */
@@ -194,9 +212,7 @@ extern prdma_nic_cb_f	_prdma_nic_init;
 extern prdma_nic_cb_f	_prdma_nic_sync;
 extern prdma_nic_cb_f	_prdma_nic_getf;
 
-#endif	/* MOD_PRDMA_NIC_SEL */
 
-#ifdef	MOD_PRDMA_SYN_MBL
 /*
  * synchronization by multi-request busy loop
  */
@@ -209,4 +225,19 @@ typedef int (*prdma_syn_wt_f)(int nreq, MPI_Request *reqs);
 extern prdma_syn_cb_f	_prdma_syn_send;
 extern prdma_syn_wt_f	_prdma_syn_wait;
 
-#endif	/* MOD_PRDMA_SYN_MBL */
+
+/*
+ * light-weight and high precision trace
+ */
+typedef int (*prdma_trc_cb_f)(int tracesize);
+typedef int (*prdma_trc_pt_f)(PrdmaReq *preq,
+		PrdmaRstate rsta, int ssta, int line);
+
+/*
+ * callback functions
+ */
+extern prdma_trc_cb_f	_prdma_trc_init;
+extern prdma_trc_cb_f	_prdma_trc_fini;
+extern prdma_trc_pt_f	_prdma_trc_wlog;
+extern prdma_trc_pt_f	_prdma_trc_rlog;
+

@@ -2,6 +2,8 @@
  * Persistent Communication based on RDMA
  *   20/02/2012	Written by Yutaka Ishikawa
  *		ishikawa@is.s.u-tokyo.ac.jp, yutaka.ishikawa@riken.jp
+ *   31/08/2012	Written by Massa. Hatanaaka
+ *		mhatanaka@riken.jp
  */
 /*
  * _prdmaSync: lower 24 bits are used for sync index
@@ -31,8 +33,10 @@
  *	_prdmaync[lsync] <-----	_prdmaSync[lsync]
  * 
  */
+/* tune default pameters (environment variables) */
+
 #define DEBUG_ON	1
-#define PRDMA_SIZE	13000
+#define PRDMA_SIZE	2048
 #define PRDMA_TRUNK_THR	(1024*1024)
 #define PRDMA_N_NICS	4
 #ifdef	USE_PRDMA_MSGSTAT
@@ -40,21 +44,18 @@
 #endif	/* USE_PRDMA_MSGSTAT */
 
 /* interconnect nic selection */
-#define MOD_PRDMA_NIC_SEL
-/* #define MOD_PRDMA_NIC_SEL_CD00 */
-/* #define MOD_PRDMA_NIC_SEL_CD01 */
-/* #define MOD_PRDMA_NIC_SEL_CD02 */
-/* #define MOD_PRDMA_NIC_SEL_CD03 */
-#define MOD_PRDMA_NIC_SEL_CD04
 /* determine the order of nic usage */
-#define MOD_PRDMA_NIC_ORD
-#define MOD_PRDMA_NIC_ORD_BYTYPE
 /* multi-request busy loop for synchronization */
-#define MOD_PRDMA_SYN_MBL
 /* busy loop for mpi_waitall() */
-#define MOD_PRDMA_BSY_WAIT
+/* extended get-tag */
+/* MPI_Test() with no wait */
+/* light-weight and high precision prdma-protocol trace */
+/* fix of MPI_Request_f2c() */
+/* release information */
 
 #include "prdma.h"
+#include "timesync.h"
+#include "version.h"
 
 #ifdef	USE_PRDMA_MSGSTAT
 typedef struct PrdmaMsgStat {
@@ -67,11 +68,12 @@ typedef struct PrdmaMsgStat {
 int	_prdmaDebug;
 int	_prdmaStat;
 int	_prdmaNosync = 0;
-int	_prdmaNoTrunk;
+int	_prdmaNoTrunk	= 1;
 int	_prdmaVerbose;
 int	_prdmaWaitTag;
-int	_prdmaRdmaSize;
+int	_prdmaRdmaSize	= PRDMA_SIZE;
 int	_prdmaMTU = 1024*1024;
+int	_prdmaTraceSize = 0;
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -91,32 +93,33 @@ static int		_prdmaNprocs;
 static int		_prdmaMyrank;
 uint64_t		_prdmaDmaThisSync;
 volatile uint64_t	*_prdmaRdmaSync;
-static PrdmaReq		*_prdmaTagTab[PRDMA_TAG_MAX];
 #ifdef	USE_PRDMA_MSGSTAT
 static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
 static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #endif	/* USE_PRDMA_MSGSTAT */
+static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
+/*
+ * dummy MPI_Request structure for MPI_Request_f2c()
+ */
+struct dummy_mreq {
+     uint64_t	ul[16]; /* 128 Bytes */
+};
+#define DUMMY_REQUEST_COUNT	256
+static unsigned int	_prdma_mreqi = 0;
+static struct dummy_mreq	_prdma_mreqs[DUMMY_REQUEST_COUNT];
 
 #define PRDMA_NIC_NPAT	4
 static int _prdmaNICID[PRDMA_NIC_NPAT] = {
      FJMPI_RDMA_NIC0,FJMPI_RDMA_NIC1,FJMPI_RDMA_NIC2,FJMPI_RDMA_NIC3
 };
-#ifndef	MOD_PRDMA_NIC_SEL
-static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
-     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
-};
-static int	_prdmaDMAFent;
-#endif	/* MOD_PRDMA_NIC_SEL */
 static PrdmaReq	*_PrdmaCQpoll();
-#ifdef	MOD_PRDMA_NIC_SEL
 static void	_PrdmaNICinit(void);
-#endif	/* MOD_PRDMA_NIC_SEL */
-#ifdef	MOD_PRDMA_SYN_MBL
 static void	_PrdmaSynMBLinit(void);
-#endif	/* MOD_PRDMA_SYN_MBL */
+static void	_PrdmaChangeState_wrapped(PrdmaReq *preq,
+			PrdmaRstate new, int newsub, int line);
+#define _PrdmaChangeState(PREQ, NSTA, NSUB) \
+		_PrdmaChangeState_wrapped(PREQ, NSTA, NSUB, __LINE__)
+static void	_PrdmaTrcinit(void);
 
 void
 _PrdmaPrintf(FILE *fp, const char *fmt, ...)
@@ -204,43 +207,10 @@ _PrdmaStatMessage(PrdmaReq *top)
 }
 #endif	/* USE_PRDMA_MSGSTAT */
 
-static int
-_PrdmaTagGet(PrdmaReq *pr)
-{
-    int		i;
-    int		count = 0;
-
-retry:
-    count++;
-    for (i = PRDMA_TAG_START; i < PRDMA_TAG_MAX; i++) {
-	if (_prdmaTagTab[i] == 0) {
-	    _prdmaTagTab[i] = pr;
-	    return i;
-	}
-    }
-    /* no more tag */
-    _PrdmaCQpoll();
-    if (count < 10000) {
-	_prdmaWaitTag++;
-	usleep(1);
-	goto retry;
-    }
-    _PrdmaPrintf(stderr, "_PrdmaTagGet: no more tag\n");
-    PMPI_Abort(MPI_COMM_WORLD, -1);
-    return -1;
-}
-
-static void
-_PrdmaTagFree(int ent)
-{
-    _prdmaTagTab[ent] = 0;
-}
-
-static PrdmaReq	*
-_PrdmaTag2Req(int ent)
-{
-    return _prdmaTagTab[ent];
-}
+static int	_PrdmaTagGet(PrdmaReq *pr);
+static void	_PrdmaTagFree(int nic, int tag /* ent */, int pid);
+static PrdmaReq	*_PrdmaTag2Req(int nic, int tag /* ent */, int pid);
+static void	_PrdmaTagInit(void);
 
 static int
 _PrdmaGetmemid()
@@ -263,7 +233,7 @@ _PrdmaReqHashKey(uint32_t key)
 static int
 _PrdmaAddrHashKey(void *addr)
 {
-    int	key = ((uint64_t)addr >> 4) & 0xffffffff;
+    int	key = ((uint64_t)(unsigned long)addr >> 4) & 0xffffffff;
     key = key & (PRDMA_DMA_HTABSIZE - 1);
     return key;
 }
@@ -382,7 +352,7 @@ _PrdmaReqAlloc(PrdmaRtype type)
     }
     memset(pq, 0, sizeof(PrdmaReq));
     pq->type = type;
-    pq->state = PRDMA_RSTATE_INIT;
+    _PrdmaChangeState(pq, PRDMA_RSTATE_INIT, -1);
     pq->uid = _PrdmaReqRegister(pq);
     return pq;
 }
@@ -396,6 +366,9 @@ _PrdmaReqfree(PrdmaReq *top)
 	_PrdmaReqUnregister(pq);
 	_PrdmaSyncFreeEntry(pq->lsync);
 	npq = pq->trunks;
+	if (_prdma_trc_rlog != NULL) {
+	    (*_prdma_trc_rlog)(pq, PRDMA_RSTATE_UNKNOWN, 0, __LINE__);
+	}
 	free(pq);
     }
 }
@@ -409,7 +382,16 @@ _PrdmaReqFind(uint64_t id)
 
     /* This is only applicable for OpenMPI */
     if (id > 0xffff) { /* Original Request ID */
-	return NULL;
+	if (
+	    ((struct dummy_mreq *)id >= &_prdma_mreqs[0])
+	    && ((struct dummy_mreq *)id < &_prdma_mreqs[DUMMY_REQUEST_COUNT])
+	) {
+	    int *c_req = (int *)id;
+	    id = c_req[21]; /* c_req->req_f_to_c_index */
+	}
+	else {
+	    return NULL;
+	}
     }
     uid = id;
     key = _PrdmaReqHashKey(uid);
@@ -496,6 +478,7 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
+    { "PRDMA_TRACESIZE", &_prdmaTraceSize },
     { 0, 0 }
 };
 
@@ -512,6 +495,7 @@ _PrdmaOptions()
 	}
     }
     if (_prdmaVerbose && _prdmaMyrank == 0) {
+	_PrdmaPrintf(stderr, "Version prdma-%s\n", PRDMA_VERSION_STRING);
 	for (po = _poptions; po->sym; po++) {
 	    if (*po->var) {
 		_PrdmaPrintf(stderr, "%s is %d\n", po->sym, *po->var);
@@ -557,6 +541,9 @@ _PrdmaFinalize()
 	}
 #endif	/* USE_PRDMA_MSGSTAT */
     }
+    if (_prdma_trc_fini != NULL) {
+	(*_prdma_trc_fini)(_prdmaTraceSize);
+    }
 
     FJMPI_Rdma_finalize();
     _prdmaInitialized = 0;
@@ -601,15 +588,17 @@ _PrdmaInit()
     memset(_prdmaDmaregs, 0, sizeof(_prdmaDmaregs));
     _prdmaRequid = PRDMA_REQ_STARTUID;
     _prdmaNumReq = 0;
-    memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
-    _prdmaRdmaSize = PRDMA_SIZE;
+    _PrdmaTagInit();
+    _PrdmaTrcinit();
     _PrdmaOptions();
-#ifdef	MOD_PRDMA_NIC_SEL
     _PrdmaNICinit();
-#endif	/* MOD_PRDMA_NIC_SEL */
-#ifdef	MOD_PRDMA_SYN_MBL
     _PrdmaSynMBLinit();
-#endif	/* MOD_PRDMA_SYN_MBL */
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    (*_prdma_trc_init)(_prdmaTraceSize);
+	    timesync_sync(&_prdma_sl, &_prdma_sr);
+	}
+    }
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -627,23 +616,26 @@ _PrdmaCQpoll()
 	cc = FJMPI_Rdma_poll_cq(_prdmaNICID[i], &cq);
 	switch (cc) {
 	case FJMPI_RDMA_NOTICE:
-	    preq = _PrdmaTag2Req(cq.tag);
+	    preq = _PrdmaTag2Req(i /* nic */, cq.tag, cq.pid);
 	    if (preq == 0) break;
 	    if (preq->type == PRDMA_RTYPE_SEND) {
 		if (preq->state == PRDMA_RSTATE_START) {
-		    preq->state = PRDMA_RSTATE_SENDER_SENT_DATA;
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SENT_DATA, -1);
 		} else if (preq->state == PRDMA_RSTATE_SENDER_SENT_DATA) {
-		    preq->state = PRDMA_RSTATE_SENDER_SEND_DONE;
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SEND_DONE, -1);
 		} else {
-		    /* unknown state */
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, -1);
 		}
 	    } else {
 		/* receiver has sent sync entry to sender */
 		if (preq->state == PRDMA_RSTATE_START) {
-		    preq->state = PRDMA_RSTATE_RECEIVER_SYNC_SENT;
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_RECEIVER_SYNC_SENT, -1);
+		}
+		else {
+		    _PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, -1);
 		}
 	    }
-	    _PrdmaTagFree(cq.tag);
+	    _PrdmaTagFree(i /* nic */, cq.tag, cq.pid);
 	    break;
 	case FJMPI_RDMA_REMOTE_NOTICE:
 	case 0:
@@ -665,9 +657,13 @@ retry:
     _PrdmaCQpoll();
     switch (preq->type) {
     case PRDMA_RTYPE_SEND:
-	if (preq->state != PRDMA_RSTATE_SENDER_SEND_DONE) goto retry;
+	if (preq->state != PRDMA_RSTATE_SENDER_SEND_DONE) {
+	    if (wait == 0) break;
+	    goto retry;
+	}
 	/* send done */
-	preq->state = PRDMA_RSTATE_DONE;
+	_PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	preq->done++;
 	cc = 1;
 	break;
     case PRDMA_RTYPE_RECV:
@@ -685,7 +681,8 @@ retry:
 	if (_prdmaSync[preq->lsync] == PRDMA_SYNC_MARKER) {
 	    /* reset the variable */
 	    _prdmaSync[preq->lsync] = PRDMA_SYNC_USED;
-	    preq->state = PRDMA_RSTATE_DONE;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_DONE, -1);
+	    preq->done++;
 	    cc = 1;
 	}
 	break;
@@ -743,7 +740,7 @@ retry:
     for (i = 0; i < count; i++) {
 	int	flag = 0;
 
-	preq = _PrdmaReqFind((uint64_t) reqs[i]);
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
 	if (preq == 0) {/* Regular Request */
 	    cc = PMPI_Test(&reqs[i], &flag, stats);
 	} else {
@@ -769,9 +766,6 @@ retry:
 	/* Conidition of keeping polling
 	   (PRDMA_FIND_ALL && found < count) || (cond == PRDMA_FIND_SOME && found == 0)
 	   || (PRDMA_FIND_ANY && found == 0 */
-#ifndef	MOD_PRDMA_BSY_WAIT
-	usleep(1);
-#endif	/* MOD_PRDMA_BSY_WAIT */
 	goto retry;
     }
 ret:
@@ -785,7 +779,7 @@ _PrdmaOneCount(int count, int dsize, size_t transsize)
 {
     int		onecnt;
 
-    if (transsize <= _prdmaRdmaSize) {
+    if (transsize < _prdmaRdmaSize) {
 	return 0;
     }
     /*onecnt = _prdmaMTU/dsize;*/
@@ -836,11 +830,9 @@ _PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
     preq->raddr = (uint64_t) -1;/* marker */
     preq->transff = 0;		/* for synchronization */
     preq->trunks = 0;		/* for divided data transfer if needed */
-#ifdef	MOD_PRDMA_NIC_SEL
     if (_prdma_nic_init != NULL) {
 	(*_prdma_nic_init)(preq);
     }
-#endif	/* MOD_PRDMA_NIC_SEL */
     return preq;
 }
 
@@ -871,14 +863,12 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) { 
 	/* The remote memid has been received */
-	preq->state = PRDMA_RSTATE_PREPARED;
-#ifdef	MOD_PRDMA_NIC_SEL
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
 	}
-#endif	/* MOD_PRDMA_NIC_SEL */
     } else {
-	preq->state = PRDMA_RSTATE_WAITRMEMID;
+	_PrdmaChangeState(preq, PRDMA_RSTATE_WAITRMEMID, -1);
     }
     return preq;
 }
@@ -1007,9 +997,7 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
      */
     info._rbid = preq->lbid;
     info._rsync = preq->lsync;
-#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
     info._rfidx = preq->fidx;
-#endif	/* MOD_PRDMA_NIC_SEL */
     MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE, source,
 	      preq->tag, _prdmaInfoCom);
     /*
@@ -1020,14 +1008,12 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) {
 	/* The memid of the synchronization variable has been received */
-	preq->state = PRDMA_RSTATE_PREPARED;
-#ifdef	MOD_PRDMA_NIC_SEL
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
 	}
-#endif	/* MOD_PRDMA_NIC_SEL */
     } else {
-	preq->state = PRDMA_RSTATE_WAITRMEMID;
+	_PrdmaChangeState(preq, PRDMA_RSTATE_WAITRMEMID, -1);
     }
     return preq;
 }
@@ -1107,32 +1093,21 @@ _PrdmaStart0(PrdmaReq *preq)
 	 * In case of receiver, snch variable index(rsync) has not arrive.
 	 */
 	PMPI_Wait(&preq->negreq, &stat);
-	preq->state = PRDMA_RSTATE_PREPARED;
-#ifdef	MOD_PRDMA_NIC_SEL
+	_PrdmaChangeState(preq, PRDMA_RSTATE_PREPARED, -1);
 	if (_prdma_nic_sync != NULL) {
 	    (*_prdma_nic_sync)(preq);
 	}
-#endif	/* MOD_PRDMA_NIC_SEL */
     } else if (preq->state == PRDMA_RSTATE_DONE) {
 	/* restart */
-	preq->state = PRDMA_RSTATE_RESTART;
+	_PrdmaChangeState(preq, PRDMA_RSTATE_RESTART, -1);
     } else if (preq->state != PRDMA_RSTATE_PREPARED) {
 	_PrdmaPrintf(stderr, "MPI_Start is invoked before MPI_Wait\n");
 	MPI_Abort(MPI_COMM_WORLD, -1);
 	return MPI_ERR_INTERN;
     }
-#ifndef	MOD_PRDMA_NIC_SEL
-/*
-    flag = FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0;
-*/
-    flag = _prdmaDMAFlag[_prdmaDMAFent];
-    _prdmaDMAFent = (_prdmaDMAFent + 1) % PRDMA_NIC_NPAT;
-#else	/* MOD_PRDMA_NIC_SEL */
     flag = (*_prdma_nic_getf)(preq);
-#endif	/* MOD_PRDMA_NIC_SEL */
     switch (preq->type) {
     case PRDMA_RTYPE_SEND:
-#ifdef	MOD_PRDMA_SYN_MBL
 	if (_prdma_syn_send != NULL) {
 	    /* remote address */
 	    if (preq->raddr == (uint64_t) -1) {
@@ -1143,7 +1118,6 @@ _PrdmaStart0(PrdmaReq *preq)
 	    (*_prdma_syn_send)(preq);
 	    return MPI_SUCCESS;
 	}
-#endif	/* MOD_PRDMA_SYN_MBL */
 	/* remote address */
 	idx = preq->lsync;
 	if (preq->raddr == (uint64_t) -1) {
@@ -1158,6 +1132,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	    }
 	}
 	/* start DMA */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 	tag = _PrdmaTagGet(preq);
 	cc1 = FJMPI_Rdma_put(preq->peer, tag,
 			     preq->raddr, preq->lbaddr,
@@ -1172,18 +1147,18 @@ _PrdmaStart0(PrdmaReq *preq)
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
-	    preq->state = PRDMA_RSTATE_START;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	} else {
 	    _PrdmaPrintf(stderr,
 		    "FJMPI_Rdma_put error in the sender side (%d, %d)\n",
 		    cc1, cc2);
-	    preq->state = PRDMA_RSTATE_ERROR;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
 	}
 	break;
     case PRDMA_RTYPE_RECV:
 	preq->transff ^= PRDMA_SYNC_FLIP;
 	if (_prdmaNosync == 1) { /* no synchronization */
-	    preq->state = PRDMA_RSTATE_RECEIVER_SYNC_SENT;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_RECEIVER_SYNC_SENT, -1);
 	} else {
 	    /* Synchronization */
 	    tag = _PrdmaTagGet(preq);
@@ -1193,10 +1168,10 @@ _PrdmaStart0(PrdmaReq *preq)
 		 _prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
 	    if (cc1 == 0) {
-		preq->state = PRDMA_RSTATE_START;
+		_PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	    } else {
 		_PrdmaPrintf(stderr, "FJMPI_Rdma_put error in the receiver side\n");
-		preq->state = PRDMA_RSTATE_ERROR;
+		_PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
 	    }
 	}
 	break;
@@ -1217,11 +1192,6 @@ _PrdmaStart(PrdmaReq *top)
 	_PrdmaStatMessage(top);
     }
 #endif	/* USE_PRDMA_MSGSTAT */
-#if	!defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE)
-    for (preq = top; preq != NULL; preq = preq->trunks) {
-	cc = _PrdmaStart0(preq);
-    }
-#else	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
     for (preq = top; preq != NULL; preq = preq->trunks) {
 	if (preq->type == PRDMA_RTYPE_RECV) {
 	    cc = _PrdmaStart0(preq);
@@ -1232,7 +1202,6 @@ _PrdmaStart(PrdmaReq *top)
 	    cc = _PrdmaStart0(preq);
 	}
     }
-#endif	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
 
     return cc;
 }
@@ -1240,48 +1209,30 @@ _PrdmaStart(PrdmaReq *top)
 int
 MPI_Start(MPI_Request *request)
 {
-    uint16_t	reqid;
     PrdmaReq	*preq;
     int		cc;
 
-    reqid = (uint16_t) ((uint64_t)*request) & 0xffff;
-    preq = _PrdmaReqFind(reqid);
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
     if (preq == 0) {/* Regular Request */
 	cc = PMPI_Start(request);
     } else {
 	cc = _PrdmaStart(preq);
     }
-#ifdef	MOD_PRDMA_SYN_MBL
     if (_prdma_syn_wait != NULL) {
 	(*_prdma_syn_wait)(1, request);
     }
-#endif	/* MOD_PRDMA_SYN_MBL */
     return cc;
 }
 
 int
 MPI_Startall(int count, MPI_Request *reqs)
 {
-    uint16_t	reqid;
     PrdmaReq	*preq;
     int		i, ret;
     int		cc = MPI_SUCCESS;
 
-#if	!defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE)
     for (i = 0; i < count; i++) {
-	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
-	preq = _PrdmaReqFind(reqid);
-	if (preq == 0) { /* Regular Request */
-	    ret = PMPI_Start(&reqs[i]);
-	} else {
-	    ret = _PrdmaStart(preq);
-	}
-	if (ret != MPI_SUCCESS) cc = ret;
-    }
-#else	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
-    for (i = 0; i < count; i++) {
-	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
-	preq = _PrdmaReqFind(reqid);
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
 	if (preq == 0) { /* Regular Request */
 	    ret = PMPI_Start(&reqs[i]);
 	} else {
@@ -1293,8 +1244,7 @@ MPI_Startall(int count, MPI_Request *reqs)
 	if (ret != MPI_SUCCESS) cc = ret;
     }
     for (i = 0; i < count; i++) {
-	reqid = (uint16_t) ((uint64_t)reqs[i]) & 0xffff;
-	preq = _PrdmaReqFind(reqid);
+	preq = _PrdmaReqFind((uint64_t)(unsigned long)reqs[i]);
 	if (preq == 0) { /* Regular Request */
 	    continue;
 	} else {
@@ -1305,12 +1255,9 @@ MPI_Startall(int count, MPI_Request *reqs)
 	}
 	if (ret != MPI_SUCCESS) cc = ret;
     }
-#endif	/* !defined(MOD_PRDMA_NIC_ORD) || !defined(MOD_PRDMA_NIC_ORD_BYTYPE) */
-#ifdef	MOD_PRDMA_SYN_MBL
     if (_prdma_syn_wait != NULL) {
 	(*_prdma_syn_wait)(count, reqs);
     }
-#endif	/* MOD_PRDMA_SYN_MBL */
     return cc;
 }
 
@@ -1324,7 +1271,7 @@ MPI_Wait(MPI_Request *request, MPI_Status *status)
     int		flag;
     int		cc;
 
-    preq = _PrdmaReqFind((uint64_t) *request);
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Wait(request, status);
@@ -1348,7 +1295,7 @@ MPI_Test(MPI_Request *request, int *flag, MPI_Status *status)
     int		cc;
     PrdmaReq	*preq;
 
-    preq = _PrdmaReqFind((uint64_t) *request);
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Test(request, flag, status);
@@ -1371,7 +1318,7 @@ MPI_Request_free(MPI_Request *request)
     PrdmaReq	*preq;
     int		cc;
 
-    preq = _PrdmaReqFind((uint64_t) *request);
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request[0]);
     if (preq == 0) {
 	/* Regular Request */
 	cc = PMPI_Request_free(request);
@@ -1489,35 +1436,61 @@ MPI_Rsend_init(void *buf, int count, MPI_Datatype datatype,
 MPI_Fint
 MPI_Request_c2f(MPI_Request request)
 {
-    uint16_t	reqid;
     PrdmaReq	*preq;
     MPI_Fint	val;
 
-    reqid = (uint16_t) ((uint64_t)request) & 0xffff;
-    preq = _PrdmaReqFind(reqid);
+    preq = _PrdmaReqFind((uint64_t)(unsigned long)request);
     if (preq == 0) {
 	val = PMPI_Request_c2f(request);
 	return val;
     } else {
-	return (MPI_Fint) reqid;
+	return (MPI_Fint)(unsigned long)request;
     }
 }
 
 MPI_Request MPI_Request_f2c(MPI_Fint request)
 {
-    uint16_t	reqid;
     PrdmaReq	*preq;
 
-    reqid = (uint16_t) ((uint64_t)request) & 0xffff;
-    preq = _PrdmaReqFind(reqid);
+    preq = _PrdmaReqFind((uint64_t)request);
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
     } else {
-	return (MPI_Request) request;
+	int ir, *c_req;
+	
+	if (_prdma_mreqi >= DUMMY_REQUEST_COUNT) {
+	    _prdma_mreqi = 0;
+#ifdef	notdef
+	    _PrdmaPrintf(stderr, "[%03d] MPI_Request_c2f() : "
+		"dummy MPI_Request structure wrap around to zero.\n",
+		_prdmaMyrank);
+#endif	/* notdef */
+	}
+	ir = _prdma_mreqi++;
+	/*
+	 * openmpi-1.6.1/ompi/mpi/f77/wait_f.c :
+	 *   c_req->req_f_to_c_index
+	 *     offsetof(struct ompi_request_t, req_f_to_c_index) = 84
+	 */
+	c_req = (int *)&_prdma_mreqs[ir];
+	c_req[21] = (int)preq->uid; /* XXX magic number [84/4] */
+	return (MPI_Request)c_req;
     }
 }
 
-#ifdef	MOD_PRDMA_NIC_SEL
+int
+MPI_Initialized(int *flag)
+{
+    int cc;
+    cc = PMPI_Initialized(flag);
+    if (_prdmaTraceSize > 0) {
+	if (_prdma_trc_init != NULL) {
+	    timesync_sync(&_prdma_el, &_prdma_er);
+	}
+    }
+    return cc;
+}
+
 
 /*
  * callback functions
@@ -1526,183 +1499,6 @@ prdma_nic_cb_f   _prdma_nic_init = NULL;
 prdma_nic_cb_f   _prdma_nic_sync = NULL;
 prdma_nic_cb_f   _prdma_nic_getf = NULL;
 
-#if	defined(MOD_PRDMA_NIC_SEL_CD00)
-/*
- * interconnect nic selection - Candidate 00
- */
-static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
-     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
-};
-static int	_prdmaDMAFent;
-
-static int
-_Prdma_NIC_getf_cd00(PrdmaReq *preq)
-{
-    int flag;
-    flag = _prdmaDMAFlag[_prdmaDMAFent];
-    _prdmaDMAFent = (_prdmaDMAFent + 1) % PRDMA_NIC_NPAT;
-    return flag;
-}
-
-static void
-_PrdmaNICinit(void)
-{
-	_prdma_nic_init = NULL;
-	_prdma_nic_sync = NULL;
-	_prdma_nic_getf = _Prdma_NIC_getf_cd00;
-}
-
-#elif	defined(MOD_PRDMA_NIC_SEL_CD01)
-
-/*
- * interconnect nic selection - Candidate 01
- */
-static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
-     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
-};
-static int	_prdmaDMAFent_s;
-static int	_prdmaDMAFent_r;
-
-static int
-_Prdma_NIC_getf_cd01(PrdmaReq *preq)
-{
-    int flag;
-    if (preq->type == PRDMA_RTYPE_SEND) {
-	flag = _prdmaDMAFlag[_prdmaDMAFent_s];
-	_prdmaDMAFent_s = (_prdmaDMAFent_s + 1) % PRDMA_NIC_NPAT;
-    }
-    else {
-	flag = _prdmaDMAFlag[_prdmaDMAFent_r];
-	_prdmaDMAFent_r = (_prdmaDMAFent_r + 1) % PRDMA_NIC_NPAT;
-    }
-    return flag;
-}
-
-static void
-_PrdmaNICinit(void)
-{
-	_prdma_nic_init = NULL;
-	_prdma_nic_sync = NULL;
-	_prdma_nic_getf = _Prdma_NIC_getf_cd01;
-}
-
-#elif	defined(MOD_PRDMA_NIC_SEL_CD02)
-
-/*
- * interconnect nic selection - Candidate 02
- */
-static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
-     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
-};
-static int	_prdmaDMAFent_s;
-static int	_prdmaDMAFent_r;
-
-static int
-_Prdma_NIC_init_cd02(PrdmaReq *preq)
-{
-    if (preq->type == PRDMA_RTYPE_SEND) {
-	preq->fidx = _prdmaDMAFent_s;
-	_prdmaDMAFent_s = (_prdmaDMAFent_s + 1) % PRDMA_NIC_NPAT;
-    }
-    else {
-	preq->fidx = _prdmaDMAFent_r;
-	_prdmaDMAFent_r = (_prdmaDMAFent_r + 1) % PRDMA_NIC_NPAT;
-    }
-    return 0;
-}
-
-static int
-_Prdma_NIC_getf_cd02(PrdmaReq *preq)
-{
-    int flag;
-    flag = _prdmaDMAFlag[preq->fidx];
-    return flag;
-}
-
-static void
-_PrdmaNICinit(void)
-{
-	_prdma_nic_init = _Prdma_NIC_init_cd02;
-	_prdma_nic_sync = NULL;
-	_prdma_nic_getf = _Prdma_NIC_getf_cd02;
-}
-
-#elif	defined(MOD_PRDMA_NIC_SEL_CD03)
-
-/*
- * interconnect nic selection - Candidate 03
- */
-static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
-     FJMPI_RDMA_LOCAL_NIC0 | FJMPI_RDMA_REMOTE_NIC0 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC1 | FJMPI_RDMA_REMOTE_NIC1 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC2 | FJMPI_RDMA_REMOTE_NIC2 | FJMPI_RDMA_PATH0,
-     FJMPI_RDMA_LOCAL_NIC3 | FJMPI_RDMA_REMOTE_NIC3 | FJMPI_RDMA_PATH0
-};
-
-static int
-_Prdma_NIC_init_cd03(PrdmaReq *preq)
-{
-    if (preq->peer == (_prdmaMyrank - 1)) {		/* West */
-        if (preq->type == PRDMA_RTYPE_SEND) {
-            preq->fidx = 0;
-        }
-        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
-            preq->fidx = 1;
-        }
-    }
-    else if (preq->peer == (_prdmaMyrank + 1)) {	/* East */
-        if (preq->type == PRDMA_RTYPE_SEND) {
-            preq->fidx = 1;
-        }
-        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
-            preq->fidx = 0;
-        }
-    }
-    else if (preq->peer < _prdmaMyrank) {		/* North */
-        if (preq->type == PRDMA_RTYPE_SEND) {
-            preq->fidx = 2;
-        }
-        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
-            preq->fidx = 3;
-        }
-    }
-    else /* if (preq->peer > _prdmaMyrank) */ {		/* South */
-        if (preq->type == PRDMA_RTYPE_SEND) {
-            preq->fidx = 3;
-        }
-        else /* if (preq->type == PRDMA_RTYPE_RECV) */ {
-            preq->fidx = 2;
-        }
-    }
-    return 0;
-}
-
-static int
-_Prdma_NIC_getf_cd03(PrdmaReq *preq)
-{
-    int flag;
-    flag = _prdmaDMAFlag[preq->fidx];
-    return flag;
-}
-
-static void
-_PrdmaNICinit(void)
-{
-	_prdma_nic_init = _Prdma_NIC_init_cd03;
-	_prdma_nic_sync = NULL;
-	_prdma_nic_getf = _Prdma_NIC_getf_cd03;
-}
-
-#elif	defined(MOD_PRDMA_NIC_SEL_CD04)
 
 /*
  * interconnect nic selection - Candidate 04
@@ -1768,18 +1564,12 @@ _PrdmaNICinit(void)
 	_prdma_nic_getf = _Prdma_NIC_getf_cd04;
 }
 
-#endif	/* defined(*) */
 
-#endif	/* MOD_PRDMA_NIC_SEL */
 
-#ifdef	MOD_PRDMA_SYN_MBL
 
 /*
  * multi-requst busy loop in synchronization
  */
-#ifndef	MOD_PRDMA_NIC_SEL
-#error	"Need to define MOD_PRDMA_NIC_SEL"
-#endif	/* MOD_PRDMA_NIC_SEL */
 
 /*
  * callback function hooks
@@ -1812,7 +1602,7 @@ _Prdma_Syn_send(PrdmaReq *preq)
     }
     else {
 	_PrdmaPrintf(stderr, "Bad state %d\n", preq->state);
-	preq->state = PRDMA_RSTATE_ERROR;
+	_PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
 	ret = -1;
 	goto bad;
     }
@@ -1833,6 +1623,7 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	preq->sndst = 1; /* dosend */
 	break;
     case 1: /* dosend */
+	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
 	tag = _PrdmaTagGet(preq);
@@ -1849,13 +1640,13 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
-	    preq->state = PRDMA_RSTATE_START;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	    ret = 1;
 	} else {
 	    _PrdmaPrintf(stderr,
 		    "FJMPI_Rdma_put error in the sender side (%d, %d)\n",
 		    cc1, cc2);
-	    preq->state = PRDMA_RSTATE_ERROR;
+	    _PrdmaChangeState(preq, PRDMA_RSTATE_ERROR, -1);
 	}
 	preq->sndst = 0; /* dosync */
 	break;
@@ -1874,10 +1665,8 @@ retry:
     doretry = 0;
     for (ir = 0; ir < nreq; ir++) {
 	PrdmaReq	*head, *preq;
-	uint16_t	reqid;
 	
-	reqid = (uint16_t) ((uint64_t)reqs[ir]) & 0xffff;
-	head = _PrdmaReqFind(reqid);
+	head = _PrdmaReqFind((uint64_t)(unsigned long)reqs[ir]);
 	if (head == 0) { /* Regular Request */
 	    continue;
 	}
@@ -1924,4 +1713,367 @@ _PrdmaSynMBLinit(void)
 	_prdma_syn_wait = _Prdma_Syn_wait;
 }
 
-#endif	/* MOD_PRDMA_SYN_MBL */
+
+/* variables */
+static PrdmaReq		*_prdmaTagTab[PRDMA_NIC_NPAT][PRDMA_TAG_MAX];
+
+/* functions */
+static int
+_PrdmaTagGet(PrdmaReq *pr)
+{
+    int		ent, tag, nic;
+    int		retries = 0;
+
+    nic = pr->fidx;
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagGet: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    ent =
+	  ((pr->peer & 0x0000000f) >>  0)
+	+ ((pr->peer & 0x000f0000) >> 16)
+	+ ((pr->peer & 0x0f000000) >> 24)
+	;
+    ent &= 0x0f;
+    if ((ent < 0) || (ent >= PRDMA_TAG_MAX)) {
+	ent = 0;
+    }
+retry:
+    retries++;
+    tag = ent;
+    do {
+	PrdmaReq *preq;
+	PrdmaReq **prev = &_prdmaTagTab[nic][tag];
+	
+	while ((preq = *prev) != 0) {
+	    if (preq == pr) {
+		break;
+	    }
+	    if (
+		(preq->peer == pr->peer)
+		/* && (preq->fidx == nic) */
+	    ) {
+		break;
+	    }
+	    prev = &preq->tnxt[tag]; /* tag next */
+	}
+	if (preq == 0) {
+#ifdef	notyet
+	    pr->tnxt[tag] = 0;
+#else	/* notyet */
+	    if (pr->tnxt[tag] != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTagGet: req busy\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+#endif	/* notyet */
+	    prev[0] = pr;
+	    return tag;
+	}
+	tag++;
+	if (tag >= PRDMA_TAG_MAX) {
+	    tag = 0;
+	}
+    } while (tag != ent);
+
+    /* no more tag */
+    _PrdmaCQpoll();
+    if (retries < 10000) {
+	_prdmaWaitTag++;
+	usleep(1);
+	goto retry;
+    }
+    _PrdmaPrintf(stderr, "_PrdmaTagGet: no more tag\n");
+    PMPI_Abort(MPI_COMM_WORLD, -1);
+    return -1;
+}
+
+static void
+_PrdmaTagFree(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, **found = 0;
+
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    if ((tag < 0) || (tag >= PRDMA_TAG_MAX)) {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: bad tag %d\n", tag);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    prev = &_prdmaTagTab[nic][tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    /* && (preq->fidx == nic) */
+	) {
+#ifdef	notyet
+	    found = prev;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTagFree: duplicated\n");
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = prev;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+    if (found != 0) {
+	preq = found[0];
+	found[0] = preq->tnxt[tag];
+	preq->tnxt[tag] = 0;
+    }
+#ifndef	notyet
+    else {
+	_PrdmaPrintf(stderr, "_PrdmaTagFree: not found\n");
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    return ;
+}
+
+static PrdmaReq	*
+_PrdmaTag2Req(int nic, int tag, int pid)
+{
+    PrdmaReq	*preq, **prev, *found = 0;
+
+#ifndef	notyet
+    if ((nic < 0) || (nic >= PRDMA_NIC_NPAT)) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: bad nic %d\n", nic);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    if ((tag < 0) || (tag >= PRDMA_TAG_MAX)) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: bad tag %d\n", tag);
+	PMPI_Abort(MPI_COMM_WORLD, -1);
+    }
+#endif	/* notyet */
+    prev = &_prdmaTagTab[nic][tag /* ent */];
+    while ((preq = *prev) != 0) {
+	if (
+	    (preq->peer == pid)
+	    /* && (preq->fidx == nic) */
+	) {
+#ifdef	notyet
+	    found = preq;
+	    break;
+#else	/* notyet */
+	    if (found != 0) {
+		_PrdmaPrintf(stderr, "_PrdmaTag2Req: duplicated, "
+		"tag %d nic %d, "
+		"%c for %d with nic %d, "
+		"%c for %d with nic %d "
+		"\n",
+		tag, nic,
+		(found->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+			found->peer, found->fidx,
+		(preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+			preq->peer, preq->fidx
+		);
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+	    found = preq;
+#endif	/* notyet */
+	}
+	prev = &preq->tnxt[tag]; /* tag next */
+    }
+#ifndef	notyet
+    if (found == 0) {
+	_PrdmaPrintf(stderr, "_PrdmaTag2Req: not found\n");
+	/* PMPI_Abort(MPI_COMM_WORLD, -1); */
+    }
+#endif	/* notyet */
+    return found;
+}
+
+static void
+_PrdmaTagInit()
+{
+    memset(_prdmaTagTab, 0, sizeof(_prdmaTagTab));
+}
+
+/*
+ * Light-weight and High Precision Trace
+ */
+/*
+ * callback functions
+ */
+prdma_trc_cb_f   _prdma_trc_init = NULL;
+prdma_trc_cb_f   _prdma_trc_fini = NULL;
+prdma_trc_pt_f   _prdma_trc_wlog = NULL;
+prdma_trc_pt_f   _prdma_trc_rlog = NULL;
+
+static void
+_PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
+{
+    /* PRDMA_RSTATE_UNKNOWN is information-only state */
+    if (new != PRDMA_RSTATE_UNKNOWN) {
+	preq->state = new;
+    }
+    if (newsub >= 0) {
+    }
+    if (_prdma_trc_wlog != NULL) {
+	(*_prdma_trc_wlog)(preq, new, newsub, line);
+    }
+}
+
+
+typedef struct PrdmaTrace {
+    uint64_t		 time;
+    PrdmaReq		*preq;
+    char                 rsta;
+    char                 ssta;
+    unsigned short	 line;
+    unsigned int	 done;
+} PrdmaTrace;
+
+static PrdmaTrace	*_prdmaTrace = 0;
+static unsigned int	 _prdmaTraceIdx;
+static unsigned int	 _prdmaTraceMax;
+
+static int	_Prdma_Trc_Rst2Str(PrdmaTrace *trc, char *bp, size_t bz);
+
+static int
+_Prdma_Trc_init_cd00(int tracesize)
+{
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
+    }
+    if (tracesize > 0) {
+	size_t msiz;
+	msiz = sizeof (_prdmaTrace[0]) * tracesize;
+	_prdmaTrace = malloc(msiz);
+        if (_prdmaTrace != 0) {
+	    _prdmaTraceIdx = 0;
+	    _prdmaTraceMax = tracesize;
+	}
+    }
+    return (_prdmaTrace != 0)? 0: 1;
+}
+
+static int
+_Prdma_Trc_fini_cd00(int tracesize)
+{
+    if (_prdmaTrace != 0) {
+	free(_prdmaTrace); _prdmaTrace = 0;
+	_prdmaTraceIdx = _prdmaTraceMax = 0;
+    }
+    return 0;
+}
+
+static int
+_Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
+{
+    PrdmaTrace *ptrc;
+    int ix;
+
+    if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
+	return -1;
+    }
+
+    if (_prdmaTraceIdx >= _prdmaTraceMax) {
+	_prdmaTraceIdx = 0;
+    }
+    ix = _prdmaTraceIdx++;
+
+    ptrc = &_prdmaTrace[ix];
+    ptrc->time = timesync_rdtsc();
+    ptrc->preq = preq;
+    ptrc->rsta = (char) rsta;
+    ptrc->ssta = (char) ssta;
+    ptrc->line = (unsigned short)line;
+    ptrc->done = preq->done;
+
+    return 0;
+}
+
+static int
+_Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
+{
+    int ix, ii;
+    double dv;
+    char buf[18];
+
+    if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
+	return -1;
+    }
+
+    ii = ix = _prdmaTraceIdx;
+    if (ix == 0) {
+	ix = _prdmaTraceMax;
+    }
+    do {
+	if (ii >= _prdmaTraceMax) {
+	    ii = 0;
+	}
+	if (_prdmaTrace[ii].preq != preq) {
+	    continue;
+	}
+	dv = 0.0;
+	buf[0] = '\0';
+	_Prdma_Trc_Rst2Str(&_prdmaTrace[ii], buf, sizeof (buf));
+	if (_prdma_el != 0) {
+	    dv = timesync_conv(_prdma_sl, _prdma_sr,
+		_prdma_el, _prdma_er, _prdmaTrace[ii].time);
+	}
+	printf("%14.9f evnt %-17s rank %2d ruid %2d type  %c "
+	    "done %2d peer %2d flcl %2d frmt %2d\n",
+	    dv, buf, _prdmaMyrank, preq->uid,
+	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
+	    _prdmaTrace[ii].done, preq->peer,
+	    preq->fidx, preq->rfidx);
+    } while (++ii != ix);
+
+    return 0;
+}
+
+static void
+_PrdmaTrcinit(void)
+{
+    _prdma_trc_init = _Prdma_Trc_init_cd00;
+    _prdma_trc_fini = _Prdma_Trc_fini_cd00;
+    _prdma_trc_wlog = _Prdma_Trc_wlog_cd00;
+    _prdma_trc_rlog = _Prdma_Trc_rlog_cd00;
+    return ;
+}
+
+static PrdmaRst2Str	_prdmaRst2str[] = PRDMA_RST2STR_TBL;
+
+static int
+_Prdma_Trc_Rst2Str(PrdmaTrace *trc, char *bp, size_t bz)
+{
+    int		cc;
+    const char	*cp;
+
+    if ((trc == 0) || (bp == 0) || (bz <= 0)) {
+       return -1;
+    }
+    cp = "(null)";
+    if (trc->rsta == PRDMA_RSTATE_UNKNOWN) {
+	if (trc->ssta == 1 /* dosend */) {
+	    cp = "dosend";
+	}
+	else {
+	    cp = "(unknown)";
+	}
+    }
+    else {
+	int ii = 0;
+	while (_prdmaRst2str[ii].str != 0) {
+	    if (_prdmaRst2str[ii].sta == (PrdmaRstate)trc->rsta) {
+		cp = _prdmaRst2str[ii].str;
+		break;
+	    }
+	    ii++;
+	}
+    }
+    cc = snprintf(bp, bz, "%s,%d", cp, trc->line);
+    return cc;
+}
+
+
