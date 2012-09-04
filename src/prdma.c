@@ -74,6 +74,7 @@
 #define MOD_PRDMA_LHP_TRC_TIMESYNC
 #define MOD_PRDMA_LHP_TRC_CD00
 #define MOD_PRDMA_LHP_TRC_PST	/* print state */
+#define MOD_PRDMA_LHP_TRC_TS2	/* time sync 2 */
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
 #define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
