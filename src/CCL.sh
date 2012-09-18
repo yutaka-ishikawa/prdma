@@ -31,6 +31,7 @@ my_unifdef()
 	-DMOD_PRDMA_LHP_TRC \
 	-DMOD_PRDMA_LHP_TRC_TIMESYNC \
 	-DMOD_PRDMA_LHP_TRC_CD00 \
+	-DMOD_PRDMA_LHP_TRC_CD00A \
 	-DMOD_PRDMA_LHP_TRC_PST \
 	-DMOD_PRDMA_LHP_TRC_TS2 \
 	-DMOD_PRDMA_F2C_FIX \
@@ -61,6 +62,7 @@ my_sed()
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC_TIMESYNC/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC_CD00/d' \
+	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC_CD00A/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC_PST/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_LHP_TRC_TS2/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_F2C_FIX/d' \
