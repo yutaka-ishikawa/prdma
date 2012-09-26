@@ -79,6 +79,7 @@
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
 #define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
+#define MOD_PRDMA_F2C_FIX_NP2
 /* release information */
 #define MOD_PRDMA_REL_INF
 
@@ -160,8 +161,13 @@ static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
 struct dummy_mreq {
      uint64_t	ul[16]; /* 128 Bytes */
 };
+#ifndef	MOD_PRDMA_F2C_FIX_NP2
 #define DUMMY_REQUEST_COUNT	256
 static unsigned int	_prdma_mreqi = 0;
+#else	/* MOD_PRDMA_F2C_FIX_NP2 */
+#define DUMMY_REQUEST_COUNT	2048
+#define PRDMA_F_TO_C_OFFSET	(1000 * 1000 * 1000)
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 static struct dummy_mreq	_prdma_mreqs[DUMMY_REQUEST_COUNT];
 #endif	/* defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP) */
 
@@ -522,6 +528,16 @@ _PrdmaReqFind(uint64_t id)
 	) {
 	    int *c_req = (int *)id;
 	    id = c_req[21]; /* c_req->req_f_to_c_index */
+#ifdef	MOD_PRDMA_F2C_FIX_NP2
+	    if (id >= PRDMA_F_TO_C_OFFSET) {
+		id -= PRDMA_F_TO_C_OFFSET;
+	    }
+	    else {
+		_PrdmaPrintf(stderr, "_PrdmaReqFind: unexpected error %lu\n",
+		    id);
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 	}
 	else {
 	    return NULL;
@@ -1801,7 +1817,11 @@ MPI_Request_c2f(MPI_Request request)
 #ifndef	MOD_PRDMA_F2C_FIX
 	return (MPI_Fint) reqid;
 #else	/* MOD_PRDMA_F2C_FIX */
+#ifndef	MOD_PRDMA_F2C_FIX_NP2
 	return (MPI_Fint)(unsigned long)request;
+#else	/* MOD_PRDMA_F2C_FIX_NP2 */
+	return (MPI_Fint)(preq->uid + PRDMA_F_TO_C_OFFSET);
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 #endif	/* MOD_PRDMA_F2C_FIX */
     }
 }
@@ -1817,7 +1837,22 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
     reqid = (uint16_t) ((uint64_t)request) & 0xffff;
     preq = _PrdmaReqFind(reqid);
 #else	/* MOD_PRDMA_F2C_FIX */
+#ifndef	MOD_PRDMA_F2C_FIX_NP2
     preq = _PrdmaReqFind((uint64_t)request);
+#else	/* MOD_PRDMA_F2C_FIX_NP2 */
+    if (request >= PRDMA_F_TO_C_OFFSET) {
+	request -= PRDMA_F_TO_C_OFFSET;
+	preq = _PrdmaReqFind((uint64_t)request);
+	if (preq == 0) {
+	    _PrdmaPrintf(stderr, "MPI_Request_f2c: unexpected error %u\n",
+		request);
+	    PMPI_Abort(MPI_COMM_WORLD, -1);
+	}
+    }
+    else {
+	preq = 0;
+    }
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 #endif	/* MOD_PRDMA_F2C_FIX */
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
@@ -1827,6 +1862,7 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
 #else	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
 	int ir, *c_req;
 	
+#ifndef	MOD_PRDMA_F2C_FIX_NP2
 	if (_prdma_mreqi >= DUMMY_REQUEST_COUNT) {
 	    _prdma_mreqi = 0;
 #ifdef	notdef
@@ -1836,13 +1872,26 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
 #endif	/* notdef */
 	}
 	ir = _prdma_mreqi++;
+#else	/* MOD_PRDMA_F2C_FIX_NP2 */
+	if (preq->uid >= DUMMY_REQUEST_COUNT) {
+	    _PrdmaPrintf(stderr, "MPI_Request_f2c: uid %d >= %d\n",
+		preq->uid, DUMMY_REQUEST_COUNT);
+	    PMPI_Abort(MPI_COMM_WORLD, -1);
+	}
+	ir = preq->uid;
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 	/*
 	 * openmpi-1.6.1/ompi/mpi/f77/wait_f.c :
 	 *   c_req->req_f_to_c_index
 	 *     offsetof(struct ompi_request_t, req_f_to_c_index) = 84
 	 */
 	c_req = (int *)&_prdma_mreqs[ir];
+#ifndef	MOD_PRDMA_F2C_FIX_NP2
 	c_req[21] = (int)preq->uid; /* XXX magic number [84/4] */
+#else	/* MOD_PRDMA_F2C_FIX_NP2 */
+	/* XXX magic number [21=84/4] */
+	c_req[21] = (int)(preq->uid + PRDMA_F_TO_C_OFFSET);
+#endif	/* MOD_PRDMA_F2C_FIX_NP2 */
 	return (MPI_Request)c_req;
 #endif	/* !defined(MOD_PRDMA_F2C_FIX) || !defined(MOD_PRDMA_F2C_FIX_NP) */
     }
