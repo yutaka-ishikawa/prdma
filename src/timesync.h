@@ -17,10 +17,8 @@
 
 #define MPI_IF_ERROR(RC)	\
 	if ((RC) != MPI_SUCCESS) { ln = __LINE__; goto bad; }
-#ifdef	MOD_PRDMA_LHP_TRC_TS2
 #define MHZ_F2HZ_UL(DV)	\
 	(unsigned long)((DV) * 1000.0 * 1000.0)
-#endif	/* MOD_PRDMA_LHP_TRC_TS2 */
 
 /*
  * read time stamp counter for sparc64 asm
@@ -36,21 +34,14 @@ static inline uint64_t timesync_rdtsc(void)
 	asm volatile("rd %%tick,%0" : "=r"(rval));
 	return (rval);
 #else
-#ifndef	MOD_PRDMA_LHP_TRC_TS2
-#error "unknown architecture for time stamp counter"
-#else	/* MOD_PRDMA_LHP_TRC_TS2 */
 	return 0UL;
-#endif	/* MOD_PRDMA_LHP_TRC_TS2 */
 #endif
 }
 
 static inline double timesync_conv(uint64_t sl, uint64_t sr, uint64_t el, uint64_t er, uint64_t lv)
 {
-#ifdef	MOD_PRDMA_LHP_TRC_TS2
 	static double hz = 0.0;
-#endif	/* MOD_PRDMA_LHP_TRC_TS2 */
 	double dv;
-#ifdef	MOD_PRDMA_LHP_TRC_TS2
 	if (hz == 0.0) {
 		FILE *fp = fopen("/proc/cpuinfo", "r");
 		if (fp == 0) {
@@ -77,19 +68,13 @@ static inline double timesync_conv(uint64_t sl, uint64_t sr, uint64_t el, uint64
 		}
 		/* printf("hz %.0f\n", hz); */
 	}
-#endif	/* MOD_PRDMA_LHP_TRC_TS2 */
 	dv = (double)(lv - sl); /* relative (from start-local-tsc) */
-#ifndef	MOD_PRDMA_LHP_TRC_TS2
-	dv *= ((double)(er - sr) / (double)(el - sl));
-	dv /= (2.0 * 1000.0 * 1000.0 * 1000.0); /* 2 GHz or 1.848 GHz */
-#else	/* MOD_PRDMA_LHP_TRC_TS2 */
 	if (el > sl) {
 		dv *= ((double)(er - sr) / (double)(el - sl));
 	}
 	if (hz > 0.0) {
 		dv /= hz; /* 2 GHz or 1.848 GHz */
 	}
-#endif	/* MOD_PRDMA_LHP_TRC_TS2 */
 	return dv;
 }
 
