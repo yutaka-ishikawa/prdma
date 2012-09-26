@@ -74,6 +74,7 @@ int	_prdmaWaitTag;
 int	_prdmaRdmaSize	= PRDMA_SIZE;
 int	_prdmaMTU = 1024*1024;
 int	_prdmaTraceSize = 0;
+int	_prdmaTraceType = 0;
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -104,8 +105,8 @@ static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
 struct dummy_mreq {
      uint64_t	ul[16]; /* 128 Bytes */
 };
-#define DUMMY_REQUEST_COUNT	256
-static unsigned int	_prdma_mreqi = 0;
+#define DUMMY_REQUEST_COUNT	2048
+#define PRDMA_F_TO_C_OFFSET	(1000 * 1000 * 1000)
 static struct dummy_mreq	_prdma_mreqs[DUMMY_REQUEST_COUNT];
 
 #define PRDMA_NIC_NPAT	4
@@ -367,7 +368,7 @@ _PrdmaReqfree(PrdmaReq *top)
 	_PrdmaSyncFreeEntry(pq->lsync);
 	npq = pq->trunks;
 	if (_prdma_trc_rlog != NULL) {
-	    (*_prdma_trc_rlog)(pq, PRDMA_RSTATE_UNKNOWN, 0, __LINE__);
+	    (*_prdma_trc_rlog)(pq, PRDMA_RSTATE_UNKNOWN, 1, __LINE__);
 	}
 	free(pq);
     }
@@ -388,6 +389,14 @@ _PrdmaReqFind(uint64_t id)
 	) {
 	    int *c_req = (int *)id;
 	    id = c_req[21]; /* c_req->req_f_to_c_index */
+	    if (id >= PRDMA_F_TO_C_OFFSET) {
+		id -= PRDMA_F_TO_C_OFFSET;
+	    }
+	    else {
+		_PrdmaPrintf(stderr, "_PrdmaReqFind: unexpected error %lu\n",
+		    id);
+		PMPI_Abort(MPI_COMM_WORLD, -1);
+	    }
 	}
 	else {
 	    return NULL;
@@ -479,6 +488,7 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
     { "PRDMA_TRACESIZE", &_prdmaTraceSize },
+    { "PRDMA_TRACETYPE", &_prdmaTraceType },
     { 0, 0 }
 };
 
@@ -589,11 +599,11 @@ _PrdmaInit()
     _prdmaRequid = PRDMA_REQ_STARTUID;
     _prdmaNumReq = 0;
     _PrdmaTagInit();
-    _PrdmaTrcinit();
     _PrdmaOptions();
     _PrdmaNICinit();
     _PrdmaSynMBLinit();
     if (_prdmaTraceSize > 0) {
+	_PrdmaTrcinit();
 	if (_prdma_trc_init != NULL) {
 	    (*_prdma_trc_init)(_prdmaTraceSize);
 	    timesync_sync(&_prdma_sl, &_prdma_sr);
@@ -1444,7 +1454,7 @@ MPI_Request_c2f(MPI_Request request)
 	val = PMPI_Request_c2f(request);
 	return val;
     } else {
-	return (MPI_Fint)(unsigned long)request;
+	return (MPI_Fint)(preq->uid + PRDMA_F_TO_C_OFFSET);
     }
 }
 
@@ -1452,28 +1462,37 @@ MPI_Request MPI_Request_f2c(MPI_Fint request)
 {
     PrdmaReq	*preq;
 
-    preq = _PrdmaReqFind((uint64_t)request);
+    if (request >= PRDMA_F_TO_C_OFFSET) {
+	request -= PRDMA_F_TO_C_OFFSET;
+	preq = _PrdmaReqFind((uint64_t)request);
+	if (preq == 0) {
+	    _PrdmaPrintf(stderr, "MPI_Request_f2c: unexpected error %u\n",
+		request);
+	    PMPI_Abort(MPI_COMM_WORLD, -1);
+	}
+    }
+    else {
+	preq = 0;
+    }
     if (preq == 0) {
 	return PMPI_Request_f2c(request);
     } else {
 	int ir, *c_req;
 	
-	if (_prdma_mreqi >= DUMMY_REQUEST_COUNT) {
-	    _prdma_mreqi = 0;
-#ifdef	notdef
-	    _PrdmaPrintf(stderr, "[%03d] MPI_Request_c2f() : "
-		"dummy MPI_Request structure wrap around to zero.\n",
-		_prdmaMyrank);
-#endif	/* notdef */
+	if (preq->uid >= DUMMY_REQUEST_COUNT) {
+	    _PrdmaPrintf(stderr, "MPI_Request_f2c: uid %d >= %d\n",
+		preq->uid, DUMMY_REQUEST_COUNT);
+	    PMPI_Abort(MPI_COMM_WORLD, -1);
 	}
-	ir = _prdma_mreqi++;
+	ir = preq->uid;
 	/*
 	 * openmpi-1.6.1/ompi/mpi/f77/wait_f.c :
 	 *   c_req->req_f_to_c_index
 	 *     offsetof(struct ompi_request_t, req_f_to_c_index) = 84
 	 */
 	c_req = (int *)&_prdma_mreqs[ir];
-	c_req[21] = (int)preq->uid; /* XXX magic number [84/4] */
+	/* XXX magic number [21=84/4] */
+	c_req[21] = (int)(preq->uid + PRDMA_F_TO_C_OFFSET);
 	return (MPI_Request)c_req;
     }
 }
@@ -1924,16 +1943,23 @@ _PrdmaChangeState_wrapped(PrdmaReq *preq, PrdmaRstate new, int newsub, int line)
 
 typedef struct PrdmaTrace {
     uint64_t		 time;
-    PrdmaReq		*preq;
     char                 rsta;
     char                 ssta;
     unsigned short	 line;
     unsigned int	 done;
+    int			 peer;
+    uint16_t		 uid;
+    char		 fidx_l;
+    char		 fidx_r;
+    uint16_t		 rsv16;
+    char		 type;
+    uint8_t		 rsv8;
 } PrdmaTrace;
 
 static PrdmaTrace	*_prdmaTrace = 0;
 static unsigned int	 _prdmaTraceIdx;
 static unsigned int	 _prdmaTraceMax;
+static FILE		*_prdmaTrcFp = 0;
 
 static int	_Prdma_Trc_Rst2Str(PrdmaTrace *trc, char *bp, size_t bz);
 
@@ -1945,12 +1971,26 @@ _Prdma_Trc_init_cd00(int tracesize)
 	_prdmaTraceIdx = _prdmaTraceMax = 0;
     }
     if (tracesize > 0) {
-	size_t msiz;
-	msiz = sizeof (_prdmaTrace[0]) * tracesize;
-	_prdmaTrace = malloc(msiz);
-        if (_prdmaTrace != 0) {
+	_prdmaTrace = calloc(tracesize, sizeof (_prdmaTrace[0]));
+	if (_prdmaTrace != 0) {
 	    _prdmaTraceIdx = 0;
 	    _prdmaTraceMax = tracesize;
+	}
+	if (_prdmaTrcFp == 0) {
+	    const char *bn; /* file base name */
+	    bn = getenv("PRDMA_TRACEFILE");
+	    if (bn == 0) {
+		bn = "prdmatrace";
+	    }
+	    else if ((bn[0] == '-') && (bn[1] == '\0')) {
+		bn = 0;
+	    }
+	    if (bn != 0) {
+		char fn[256];
+		snprintf(fn, sizeof (fn), "%s_%05d.txt",
+		    bn, _prdmaMyrank);
+		_prdmaTrcFp = fopen(fn, "w");
+	    }
 	}
     }
     return (_prdmaTrace != 0)? 0: 1;
@@ -1959,6 +1999,16 @@ _Prdma_Trc_init_cd00(int tracesize)
 static int
 _Prdma_Trc_fini_cd00(int tracesize)
 {
+    if (_prdma_trc_rlog != NULL) {
+	timesync_sync(&_prdma_el, &_prdma_er);
+	(*_prdma_trc_rlog)(0 /* preq */, PRDMA_RSTATE_UNKNOWN, 0, __LINE__);
+    }
+    if (
+	(_prdmaTrcFp != 0)
+	&& (_prdmaTrcFp != stdout) && (_prdmaTrcFp != stderr)
+    ) {
+	fclose(_prdmaTrcFp); _prdmaTrcFp = 0;
+    }
     if (_prdmaTrace != 0) {
 	free(_prdmaTrace); _prdmaTrace = 0;
 	_prdmaTraceIdx = _prdmaTraceMax = 0;
@@ -1983,11 +2033,15 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 
     ptrc = &_prdmaTrace[ix];
     ptrc->time = timesync_rdtsc();
-    ptrc->preq = preq;
     ptrc->rsta = (char) rsta;
     ptrc->ssta = (char) ssta;
     ptrc->line = (unsigned short)line;
     ptrc->done = preq->done;
+    ptrc->peer = preq->peer;
+    ptrc->uid = preq->uid;
+    ptrc->fidx_l = preq->fidx;
+    ptrc->fidx_r = preq->rfidx;
+    ptrc->type = preq->type;
 
     return 0;
 }
@@ -1997,11 +2051,22 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 {
     int ix, ii;
     double dv;
+    FILE *tfp = 0;
     char buf[18];
 
     if ((_prdmaTraceMax <= 0) || (_prdmaTrace == 0)) {
 	return -1;
     }
+    switch (_prdmaTraceType & 0xff) {
+    case 0x01: /* mpi_request_free() only */
+	if (preq == 0) { return 0; }
+	break;
+    case 0x00: /* mpi_finalize() only (default) */
+    default:
+	if (ssta != 0) { return 0; }
+	break;
+    }
+    tfp = (_prdmaTrcFp == 0)? stdout: _prdmaTrcFp;
 
     ii = ix = _prdmaTraceIdx;
     if (ix == 0) {
@@ -2011,7 +2076,10 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	if (ii >= _prdmaTraceMax) {
 	    ii = 0;
 	}
-	if (_prdmaTrace[ii].preq != preq) {
+	if ((preq != 0) && (_prdmaTrace[ii].uid != preq->uid)) {
+	    continue;
+	}
+	else if ((preq == 0) && (_prdmaTrace[ii].uid == 0)) {
 	    continue;
 	}
 	dv = 0.0;
@@ -2021,12 +2089,12 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	    dv = timesync_conv(_prdma_sl, _prdma_sr,
 		_prdma_el, _prdma_er, _prdmaTrace[ii].time);
 	}
-	printf("%14.9f evnt %-17s rank %2d ruid %2d type  %c "
+	fprintf(tfp, "%14.9f evnt %-17s rank %2d ruid %2d type  %c "
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
-	    dv, buf, _prdmaMyrank, preq->uid,
-	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, preq->peer,
-	    preq->fidx, preq->rfidx);
+	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
+	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
+	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r);
     } while (++ii != ix);
 
     return 0;

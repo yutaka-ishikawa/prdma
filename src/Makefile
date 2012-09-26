@@ -4,7 +4,7 @@ CFLAGS	= -DFJ_MPI -O3 -Xg
 #CFLAGS	= -O3 -Wall -g
 RM	=	rm
 
-prdma.o: prdma.c prdma.h timesync.h
+prdma.o: prdma.c prdma.h timesync.h version.h
 	$(MPICC) $(CFLAGS) -c prdma.c
 
 clean:

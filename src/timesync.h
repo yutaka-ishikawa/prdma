@@ -15,7 +15,10 @@
 
 #define TIMESYNC_ITER	500
 
-#define MPI_IF_ERROR(RC)	if ((RC) != MPI_SUCCESS) { ln = __LINE__; goto bad; }
+#define MPI_IF_ERROR(RC)	\
+	if ((RC) != MPI_SUCCESS) { ln = __LINE__; goto bad; }
+#define MHZ_F2HZ_UL(DV)	\
+	(unsigned long)((DV) * 1000.0 * 1000.0)
 
 /*
  * read time stamp counter for sparc64 asm
@@ -31,16 +34,47 @@ static inline uint64_t timesync_rdtsc(void)
 	asm volatile("rd %%tick,%0" : "=r"(rval));
 	return (rval);
 #else
-#error "unknown architecture for time stamp counter"
+	return 0UL;
 #endif
 }
 
 static inline double timesync_conv(uint64_t sl, uint64_t sr, uint64_t el, uint64_t er, uint64_t lv)
 {
+	static double hz = 0.0;
 	double dv;
+	if (hz == 0.0) {
+		FILE *fp = fopen("/proc/cpuinfo", "r");
+		if (fp == 0) {
+			hz = -1.0;
+		}
+		else {
+			unsigned long lu = 0;
+			const char *fmt1 = "Cpu0ClkTck\t: %lx\n";
+#if	defined(__x86_64__)
+			const char *fmt2 = "cpu MHz\t\t: %f\n";
+			float fv = 0.0;
+#endif	/* defined(__x86_64__) */
+			char buf[1024];
+			while (fgets(buf, sizeof (buf), fp) != 0) {
+				int rc = sscanf(buf, fmt1, &lu);
+				if (rc == 1) { break; }
+#if	defined(__x86_64__)
+				rc = sscanf(buf, fmt2, &fv);
+				if (rc == 1) { lu = MHZ_F2HZ_UL(fv); break; }
+#endif	/* defined(__x86_64__) */
+			}
+			hz = (lu <= 0)? -2.0: (double)lu;
+			fclose(fp); fp = 0;
+		}
+		/* printf("hz %.0f\n", hz); */
+	}
 	dv = (double)(lv - sl); /* relative (from start-local-tsc) */
-	dv *= ((double)(er - sr) / (double)(el - sl));
-	dv /= (2.0 * 1000.0 * 1000.0 * 1000.0); /* 2 GHz or 1.848 GHz */
+	if (el > sl) {
+		dv *= ((double)(er - sr) / (double)(el - sl));
+	}
+	if (hz > 0.0) {
+		dv /= hz; /* 2 GHz or 1.848 GHz */
+	}
 	return dv;
 }
 
@@ -72,7 +106,8 @@ static int timesync_sync(uint64_t *lsynctimep, uint64_t *rsynctimep)
 	rc = MPI_Type_size(type, &esiz);
 	MPI_IF_ERROR(rc);
 	if (esiz != sizeof (uint64_t)) {
-		fprintf(stderr, "[%03d] %d != %d\n", rank, esiz, sizeof (uint64_t));
+		fprintf(stderr, "[%03d] %d != %ld\n",
+			rank, esiz, (long) sizeof (uint64_t));
 		rc = MPI_ERR_OTHER;
 		goto bad;
 	}
