@@ -1,1 +1,1 @@
-#define PRDMA_VERSION_STRING	"1.2.0b"
+#define PRDMA_VERSION_STRING	"1.2.0c"
