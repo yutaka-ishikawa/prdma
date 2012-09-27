@@ -2990,6 +2990,11 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 #endif	/* MOD_PRDMA_LHP_TRC_PST */
     } while (++ii != ix);
 
+#ifndef	MOD_PRDMA_LHP_TRC_CD00A
+    fflush(stdout);
+#else	/* MOD_PRDMA_LHP_TRC_CD00A */
+    fflush(tfp);
+#endif	/* MOD_PRDMA_LHP_TRC_CD00A */
     return 0;
 }
 
