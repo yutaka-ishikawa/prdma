@@ -74,6 +74,7 @@
 #define MOD_PRDMA_LHP_TRC_TIMESYNC
 #define MOD_PRDMA_LHP_TRC_CD00
 #define MOD_PRDMA_LHP_TRC_CD00A
+#define MOD_PRDMA_LHP_TRC_CD00B
 #define MOD_PRDMA_LHP_TRC_PST	/* print state */
 #define MOD_PRDMA_LHP_TRC_TS2	/* time sync 2 */
 /* fix of MPI_Request_f2c() */
@@ -2762,6 +2763,9 @@ typedef struct PrdmaTrace {
     uint16_t		 rsv16;
     char		 type;
     uint8_t		 rsv8;
+#ifdef	MOD_PRDMA_LHP_TRC_CD00B
+    unsigned int	 msiz;
+#endif	/* MOD_PRDMA_LHP_TRC_CD00B */
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
 } PrdmaTrace;
 
@@ -2886,6 +2890,9 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
     ptrc->fidx_r = preq->rfidx;
     ptrc->type = preq->type;
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
+#ifdef	MOD_PRDMA_LHP_TRC_CD00B
+    ptrc->msiz = preq->size;
+#endif	/* MOD_PRDMA_LHP_TRC_CD00B */
 
     return 0;
 }
@@ -2980,16 +2987,31 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	    _prdmaTrace[ii].done, preq->peer,
 	    preq->fidx, preq->rfidx);
 #else	/* MOD_PRDMA_LHP_TRC_CD00A */
+#ifndef	MOD_PRDMA_LHP_TRC_CD00B
 	fprintf(tfp, "%14.9f evnt %-17s rank %2d ruid %2d type  %c "
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
 	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
 	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
 	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r);
+#else	/* MOD_PRDMA_LHP_TRC_CD00B */
+	fprintf(tfp, "%14.9f evnt %-17s rank %2d ruid %2d type  %c "
+	    "done %2d peer %2d flcl %2d frmt %2d size %7d\n",
+	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
+	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
+	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r,
+	    _prdmaTrace[ii].msiz);
+#endif	/* MOD_PRDMA_LHP_TRC_CD00B */
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
 #endif	/* MOD_PRDMA_LHP_TRC_PST */
     } while (++ii != ix);
 
+#ifndef	MOD_PRDMA_LHP_TRC_CD00A
+    fflush(stdout);
+#else	/* MOD_PRDMA_LHP_TRC_CD00A */
+    fflush(tfp);
+#endif	/* MOD_PRDMA_LHP_TRC_CD00A */
     return 0;
 }
 
