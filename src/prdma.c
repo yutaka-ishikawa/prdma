@@ -81,6 +81,7 @@
 #define MOD_PRDMA_LHP_TRC_CD00B
 #define MOD_PRDMA_LHP_TRC_PST	/* print state */
 #define MOD_PRDMA_LHP_TRC_TS2	/* time sync 2 */
+#define MOD_PRDMA_LHP_TRC_TS3	/* time sync 3 */
 /* fix of MPI_Request_f2c() */
 #define MOD_PRDMA_F2C_FIX
 #define MOD_PRDMA_F2C_FIX_NP	/* non-portable hacking */
@@ -832,6 +833,9 @@ _PrdmaInit()
 	}
 	else {
 	    int64_t hz = 0;
+#ifdef	MOD_PRDMA_LHP_TRC_TS3
+	    hz = timesync_gethz();
+#endif	/* MOD_PRDMA_LHP_TRC_TS3 */
 	    if (hz <= 0) {
 		hz = 2000UL * 1000 * 1000;
 	    }
