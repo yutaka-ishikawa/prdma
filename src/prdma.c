@@ -87,6 +87,8 @@
 #define MOD_PRDMA_F2C_FIX_NP2
 /* release information */
 #define MOD_PRDMA_REL_INF
+/* synchronization can be postponed */
+#define MOD_PRDMA_SYN_PPD
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -133,6 +135,9 @@ int	_prdmaTraceType = 0;
 #ifdef	MOD_PRDMA_TUN_PRM_SYN
 int	_prdmaSyncSize = PRDMA_SYNC_SIZE;
 #endif	/* MOD_PRDMA_TUN_PRM_SYN */
+#ifdef	MOD_PRDMA_SYN_PPD
+int	_prdmaStartTimeout = 0;
+#endif	/* MOD_PRDMA_SYN_PPD */
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -162,6 +167,13 @@ static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
 #endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#ifdef	MOD_PRDMA_SYN_PPD
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+static struct timeval	_prdma_to;	/* timeout */
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+static uint64_t		_prdma_to_tsc = 0; /* timeout time stamp counter */
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#endif	/* MOD_PRDMA_SYN_PPD */
 #if	defined(MOD_PRDMA_F2C_FIX) && defined(MOD_PRDMA_F2C_FIX_NP)
 /*
  * dummy MPI_Request structure for MPI_Request_f2c()
@@ -646,6 +658,9 @@ static struct PrdmaOptions _poptions[] = {
 #ifdef	MOD_PRDMA_LHP_TRC_CD00A
     { "PRDMA_TRACETYPE", &_prdmaTraceType },
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
+#ifdef	MOD_PRDMA_SYN_PPD
+    { "PRDMA_STARTTOUT", &_prdmaStartTimeout },
+#endif	/* MOD_PRDMA_SYN_PPD */
     { 0, 0 }
 };
 
@@ -806,6 +821,26 @@ _PrdmaInit()
 	}
     }
 #endif	/* MOD_PRDMA_LHP_TRC */
+#ifdef	MOD_PRDMA_SYN_PPD
+    {
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+	_prdma_to.tv_sec  = _prdmaStartTimeout / (1000 * 1000);
+	_prdma_to.tv_usec = _prdmaStartTimeout % (1000 * 1000);
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+	if (_prdmaStartTimeout <= 0) { /* in micro sec */
+	    _prdma_to_tsc = 0;
+	}
+	else {
+	    int64_t hz = 0;
+	    if (hz <= 0) {
+		hz = 2000UL * 1000 * 1000;
+	    }
+	    _prdma_to_tsc = _prdmaStartTimeout * hz
+				/ (1000 * 1000);
+	}
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    }
+#endif	/* MOD_PRDMA_SYN_PPD */
 
     atexit(_PrdmaFinalize);
     _prdmaInitialized = 1;
@@ -956,6 +991,29 @@ _PrdmaMultiTest0(MPI_Request *req, PrdmaReq *top, int *flag)
 	    _prdmaErrorExit(3);
 	    continue;
 	}
+#ifdef	MOD_PRDMA_SYN_PPD
+	if (
+	    (preq->state == PRDMA_RSTATE_PREPARED)
+	    || (preq->state == PRDMA_RSTATE_RESTART)
+	) {
+	    /* MPI_Start() or MPI_Startall() have not been called */
+	    if (preq->raddr == (uint64_t) -1) {
+		continue;
+	    }
+	    if (_prdma_syn_send != NULL) {
+		int ret;
+		if (preq->sndst == 0 /* dosync */) {
+		    ret = (*_prdma_syn_send)(preq);
+		    if (ret <= 0) {
+			continue;
+		    }
+		}
+		/* dosend : (preq->sndst == 1) */
+		ret = (*_prdma_syn_send)(preq);
+		/* ret == 0 ; why? */
+	    }
+	}
+#endif	/* MOD_PRDMA_SYN_PPD */
 	/* PRDMA transaction */
 	if (preq->state != PRDMA_RSTATE_DONE) {
 	    if (_PrdmaTest(preq, 0) == 0) continue;  /* still progress */
@@ -2300,8 +2358,26 @@ static int
 _Prdma_Syn_wait(int nreq, MPI_Request *reqs)
 {
     int ir;
+#ifdef	MOD_PRDMA_SYN_PPD
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+    struct timeval ts, te, td;
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    uint64_t ts, te;
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#endif	/* MOD_PRDMA_SYN_PPD */
     int doretry;
 
+#ifdef	MOD_PRDMA_SYN_PPD
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+    if ((_prdma_to.tv_sec > 0) || (_prdma_to.tv_usec > 0)) {
+	(void) gettimeofday(&ts, 0);
+    }
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+    if (_prdma_to_tsc > 0) {
+	ts = timesync_rdtsc();
+    }
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#endif	/* MOD_PRDMA_SYN_PPD */
 retry:
     doretry = 0;
     for (ir = 0; ir < nreq; ir++) {
@@ -2350,7 +2426,41 @@ retry:
 	
     }
     if (doretry > 0) {
+#ifndef	MOD_PRDMA_SYN_PPD
 	goto retry;
+#else	/* MOD_PRDMA_SYN_PPD */
+#ifndef	MOD_PRDMA_LHP_TRC_TIMESYNC
+	if ((_prdma_to.tv_sec == 0) && (_prdma_to.tv_usec == 0)) {
+	    goto retry;
+	}
+	(void) gettimeofday(&te, 0);
+
+	/* td = (te - ts) */
+	td.tv_sec  = te.tv_sec  - ts.tv_sec;
+	td.tv_usec = te.tv_usec - ts.tv_usec;
+	if (td.tv_usec < 0) {
+	    td.tv_sec--;
+	    td.tv_usec += 1000000;
+	}
+
+	/* (td < to) */
+	if (
+	    (td.tv_sec == _prdma_to.tv_sec)?
+		(td.tv_usec < _prdma_to.tv_usec):
+		(td.tv_sec < _prdma_to.tv_sec)
+	) {
+	    goto retry;
+	}
+#else	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+	if (_prdma_to_tsc <= 0) {
+	    goto retry;
+	}
+	te = timesync_rdtsc();
+	if ((te - ts) < _prdma_to_tsc) {
+	    goto retry;
+	}
+#endif	/* MOD_PRDMA_LHP_TRC_TIMESYNC */
+#endif	/* MOD_PRDMA_SYN_PPD */
     }
     return MPI_SUCCESS;
 }
