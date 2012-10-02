@@ -35,6 +35,7 @@
  */
 /* tune default pameters (environment variables) */
 #define MOD_PRDMA_TUN_PRM
+#define MOD_PRDMA_TUN_PRM_SYN
 
 #define DEBUG_ON	1
 #ifndef	MOD_PRDMA_TUN_PRM
@@ -47,6 +48,9 @@
 #ifdef	USE_PRDMA_MSGSTAT
 #define PRDMA_MSGSTAT_SIZE	1024
 #endif	/* USE_PRDMA_MSGSTAT */
+#ifdef	MOD_PRDMA_TUN_PRM_SYN
+#define PRDMA_SYNC_SIZE	512
+#endif	/* MOD_PRDMA_TUN_PRM_SYN */
 
 /* interconnect nic selection */
 #define MOD_PRDMA_NIC_SEL
@@ -126,6 +130,9 @@ int	_prdmaTraceSize = 0;
 int	_prdmaTraceType = 0;
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
 #endif	/* MOD_PRDMA_LHP_TRC */
+#ifdef	MOD_PRDMA_TUN_PRM_SYN
+int	_prdmaSyncSize = PRDMA_SYNC_SIZE;
+#endif	/* MOD_PRDMA_TUN_PRM_SYN */
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -630,6 +637,9 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
+#ifdef	MOD_PRDMA_TUN_PRM_SYN
+    { "PRDMA_SYNCSIZE", &_prdmaSyncSize },
+#endif	/* MOD_PRDMA_TUN_PRM_SYN */
 #ifdef	MOD_PRDMA_LHP_TRC
     { "PRDMA_TRACESIZE", &_prdmaTraceSize },
 #endif	/* MOD_PRDMA_LHP_TRC */
@@ -723,7 +733,18 @@ _PrdmaInit()
     MPI_Comm_dup(MPI_COMM_WORLD, &_prdmaMemidCom);
     FJMPI_Rdma_init();
     /* Synchronization structure is initialized */
+#ifndef	MOD_PRDMA_TUN_PRM_SYN
     _prdmaMaxSync = _prdmaNprocs * PRDMA_NSYNC_PERPROC;
+#else	/* MOD_PRDMA_TUN_PRM_SYN */
+    {
+	/* from _PrdmaOptions() */
+	const char *cp = getenv("PRDMA_SYNCSIZE");
+	if (cp) {
+	    _prdmaSyncSize = atoi(cp);
+	}
+	_prdmaMaxSync = (_prdmaSyncSize < 8)? 8: _prdmaSyncSize;
+    }
+#endif	/* MOD_PRDMA_TUN_PRM_SYN */
     size = sizeof(uint32_t)*_prdmaMaxSync;
     _prdmaSync = malloc(size);
     _prdmaRdmaSync= malloc(sizeof(uint64_t)*_prdmaNprocs);

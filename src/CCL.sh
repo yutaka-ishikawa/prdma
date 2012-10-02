@@ -13,6 +13,7 @@ my_unifdef()
 {
     unifdef \
 	-DMOD_PRDMA_TUN_PRM \
+	-DMOD_PRDMA_TUN_PRM_SYN \
 	-DMOD_PRDMA_NIC_SEL \
 	-UMOD_PRDMA_NIC_SEL_CD00 \
 	-UMOD_PRDMA_NIC_SEL_CD01 \
@@ -46,6 +47,7 @@ my_sed()
 {
     sed \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_TUN_PRM/d' \
+	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_TUN_PRM_SYN/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_NIC_SEL/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_NIC_SEL_CD00/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_NIC_SEL_CD01/d' \

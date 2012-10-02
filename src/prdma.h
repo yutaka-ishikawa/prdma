@@ -187,7 +187,9 @@ typedef struct PrdmaReq {
 #define PRDMA_SYNC_CNSTFF_0	1
 #define PRDMA_SYNC_CNSTFF_1	2
 #define PRDMA_SYNC_CNSTSIZE	4
+#ifndef	MOD_PRDMA_TUN_PRM_SYN
 #define PRDMA_NSYNC_PERPROC	8		/* O(N) */
+#endif	/* MOD_PRDMA_TUN_PRM_SYN */
 
 #define PRDMA_FIND_ANY		1
 #define PRDMA_FIND_ALL		2
