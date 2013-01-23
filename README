@@ -1,0 +1,33 @@
+1. To install PRDMA
+  $ cd src
+  $ make
+ Make sure that the prdma.o file has been created without errors.
+
+2. How to use the PRMDA library
+  Just linking prdma.o to your application code.
+    e.g.,
+	mpifccpx -o app obj1.o obj2.o obj3.o prdma.o
+  That's it. You do not need to modify your programs. The PRDMA library takes
+  over the persistent communication operations.
+
+3. The following environment variables are used as options in PRDMA.
+   1) PRDMA_NOSYNC
+      If the PRDMA_NOSYNC variable is set to 1,
+      the MPI_Startall operation is started in each process without synchronizing
+      other processes.
+      This option is useful, if the programmer knows that all processes may start
+      the MPI_Startall operation independently because some synchronization,
+      such as a reduction operation, has been issued and after that all memory
+      areas involved with the persistent communication are ready to send/receive.
+   2) PRDMA_RDMASIZE
+      If the message size is smaller than the value of PRDMA_RDMASIZE in byte,
+      the original persistent communication primitive is used.
+      The default value is 13Kbyte.
+   3) PRDMA_STATISTIC
+      Show the statistics of persistent communications in the error log file.
+   4) PRDMA_VERBOSE
+      Show which options have been specified in the error log file.
+   5) The following environment variables are for debug purposes.
+       PRDMA_TRACESIZE
+       PRDMA_TRACETYPE
+       PRDMA_NOTRUNK
