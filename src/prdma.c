@@ -90,6 +90,8 @@
 #define MOD_PRDMA_REL_INF
 /* synchronization can be postponed */
 #define MOD_PRDMA_SYN_PPD
+/* miscellaneous fixes */
+#define MOD_PRDMA_MSC_FIX
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -1279,6 +1281,19 @@ MPI_Init(int *argc, char ***argv)
     _PrdmaInit();
     return MPI_SUCCESS;
 }
+#ifdef	MOD_PRDMA_MSC_FIX
+
+int
+MPI_Init_thread(int *argc, char ***argv, int required, int *provided)
+{
+    int		cc;
+
+    cc = PMPI_Init_thread(argc, argv, required, provided);
+    if (cc != MPI_SUCCESS) return cc;
+    _PrdmaInit();
+    return MPI_SUCCESS;
+}
+#endif	/* MOD_PRDMA_MSC_FIX */
 
 int
 MPI_Finalize()

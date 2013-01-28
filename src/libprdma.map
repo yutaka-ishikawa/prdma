@@ -1,6 +1,7 @@
 {
 	global:
 		MPI_Init;
+		MPI_Init_thread;
 		MPI_Finalize;
 		MPI_Initialized;
 		MPI_Send_init;
