@@ -431,7 +431,11 @@ _PrdmaReqRegister(PrdmaReq *pr)
     PrdmaReq	*pq, *opq;
 
     if (_prdmaNumReq > PRDMA_REQ_MAXREQ) {
+#ifndef	MOD_PRDMA_MSC_FIX
 	MPI_Abort(MPI_COMM_WORLD, -1);
+#else	/* MOD_PRDMA_MSC_FIX */
+	_prdmaErrorExit(1);
+#endif	/* MOD_PRDMA_MSC_FIX */
 	return -1;
     }
 retry:
