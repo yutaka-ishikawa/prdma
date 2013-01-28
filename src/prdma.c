@@ -93,8 +93,13 @@
 /* miscellaneous fixes */
 #define MOD_PRDMA_MSC_FIX
 
+#ifndef	MOD_PRDMA_MSC_FIX
 #define WPEERW	worldrank
 #define WPEER	peer
+#else	/* MOD_PRDMA_MSC_FIX */
+#define WPEERW	wpeer
+#define WPEER	WPEERW
+#endif	/* MOD_PRDMA_MSC_FIX */
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
