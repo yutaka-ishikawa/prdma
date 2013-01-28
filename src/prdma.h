@@ -135,7 +135,7 @@ typedef struct PrdmaReq {
 					 * remote sync start address in recv */
     MPI_Request		negreq;		/* for negotiation */
     size_t		size;		/* size in byte of this MPI message */
-    int			worldrank;	/* rank in MPI_COMM_WORLD */
+    int			WPEERW;		/* remote rank in MPI_COMM_WORLD */
     int			transcnt;	/* count in this message */
     struct PrdmaReq	*trunks;	/* packetized */
     /* The following entries are parameters of send/recv_init function */

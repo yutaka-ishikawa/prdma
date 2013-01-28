@@ -93,6 +93,14 @@
 /* miscellaneous fixes */
 #define MOD_PRDMA_MSC_FIX
 
+#ifndef	MOD_PRDMA_MSC_FIX
+#define WPEERW	worldrank
+#define WPEER	peer
+#else	/* MOD_PRDMA_MSC_FIX */
+#define WPEERW	wpeer
+#define WPEER	WPEERW
+#endif	/* MOD_PRDMA_MSC_FIX */
+
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
 #include "timesync.h"
@@ -239,17 +247,17 @@ int
 _PrdmaGetCommWorldRank(MPI_Comm mycomm, int myrank)
 {
     MPI_Group	worldgrp, mygrp;
-    int		worldrank;
+    int		WPEERW;
 
     MPI_Comm_group(MPI_COMM_WORLD, &worldgrp);
     MPI_Comm_group(mycomm, &mygrp);
 
-    MPI_Group_translate_ranks(mygrp, 1, &myrank, worldgrp, &worldrank);
+    MPI_Group_translate_ranks(mygrp, 1, &myrank, worldgrp, &WPEERW);
 
     MPI_Group_free(&mygrp);
     MPI_Group_free(&worldgrp);
 
-    return worldrank;
+    return WPEERW;
 }
 
 
@@ -385,11 +393,11 @@ _PrdmaAddrHashKey(void *addr)
 }
 
 static void
-_PrdmaCheckRdmaSync(int peer)
+_PrdmaCheckRdmaSync(int WPEER)
 {
-    if (_prdmaRdmaSync[peer] == 0) {
-	_prdmaRdmaSync[peer]
-	    = FJMPI_Rdma_get_remote_addr(peer,PRDMA_MEMID_SYNC);
+    if (_prdmaRdmaSync[WPEER] == 0) {
+	_prdmaRdmaSync[WPEER]
+	    = FJMPI_Rdma_get_remote_addr(WPEER,PRDMA_MEMID_SYNC);
     }
 }
 
@@ -1123,7 +1131,7 @@ _PrdmaOneCount(int count, int dsize, size_t transsize)
 
 
 PrdmaReq	*
-_PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
+_PrdmaReqCommonSetup(PrdmaRtype type, int WPEERW, size_t transsize,
 		     int transcount, int lbid, uint64_t	lbaddr,
 		     void *buf, int count,
 		     MPI_Datatype datatype, int peer, int tag,
@@ -1141,14 +1149,14 @@ _PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
 	return 0;
     }
     /* checking if the synchronization structure has been obtained */
-    _PrdmaCheckRdmaSync(worldrank);
+    _PrdmaCheckRdmaSync(WPEERW);
     /*
      * All required resources have been allocated.
      */
     /* MPI arguments are stored */
     PRDMA_SET_REQ(preq, buf, count, datatype, peer, tag, comm, request);
     preq->size = transsize;	/* transfer size in byte */
-    preq->worldrank = worldrank;/* peer rank in COMM_WORLD_COMM */
+    preq->WPEERW = WPEERW;/* peer rank in COMM_WORLD_COMM */
     preq->transcnt = transcount;/* actual count in this request */
     preq->lbid = lbid;		/* memid of local comm. buffer */
     preq->lbaddr = lbaddr;	/* dma address of local comm. buffer */
@@ -1181,12 +1189,21 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
     if (preq == NULL) {
 	return 0;
     }
+#ifndef	MOD_PRDMA_MSC_FIX
     /* Needs remote memid to get the remote DMA address */
     MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE, dest,
 	      preq->tag, _prdmaInfoCom, &preq->negreq);
     /* Send the DMA address of synch entry to dest. */
     MPI_Bsend(&preq->lsync, sizeof(int),
 	      MPI_BYTE, dest, preq->tag, _prdmaMemidCom);
+#else	/* MOD_PRDMA_MSC_FIX */
+    /* Needs remote memid to get the remote DMA address */
+    MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom, &preq->negreq);
+    /* Send the DMA address of synch entry to dest. */
+    MPI_Bsend(&preq->lsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom);
+#endif	/* MOD_PRDMA_MSC_FIX */
     /* now testing the previous request to get the remote memid */
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) { 
@@ -1364,6 +1381,7 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
 #if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
     info._rfidx = preq->fidx;
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifndef	MOD_PRDMA_MSC_FIX
     MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE, source,
 	      preq->tag, _prdmaInfoCom);
     /*
@@ -1371,6 +1389,15 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
      */
     MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE, source,
 	      preq->tag, _prdmaMemidCom, &preq->negreq);
+#else	/* MOD_PRDMA_MSC_FIX */
+    MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom);
+    /*
+     * Needs memid of the synchronization variable in the sender
+     */
+    MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom, &preq->negreq);
+#endif	/* MOD_PRDMA_MSC_FIX */
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) {
 	/* The memid of the synchronization variable has been received */
@@ -1519,7 +1546,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	if (_prdma_syn_send != NULL) {
 	    /* remote address */
 	    if (preq->raddr == (uint64_t) -1) {
-		preq->raddr = FJMPI_Rdma_get_remote_addr(preq->peer, preq->rbid);
+		preq->raddr = FJMPI_Rdma_get_remote_addr(preq->WPEER, preq->rbid);
 	    }
 	    preq->transff ^= PRDMA_SYNC_FLIP;
 	    preq->sndst = 0; /* dosync */
@@ -1530,7 +1557,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	/* remote address */
 	idx = preq->lsync;
 	if (preq->raddr == (uint64_t) -1) {
-	    preq->raddr = FJMPI_Rdma_get_remote_addr(preq->peer, preq->rbid);
+	    preq->raddr = FJMPI_Rdma_get_remote_addr(preq->WPEER, preq->rbid);
 	}
 	preq->transff ^= PRDMA_SYNC_FLIP;
 	if (_prdmaNosync == 0) {
@@ -1545,7 +1572,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 #endif	/* MOD_PRDMA_LHP_TRC */
 	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->peer, tag,
+	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
 	/*
@@ -1553,8 +1580,8 @@ _PrdmaStart0(PrdmaReq *preq)
 	 * transaction
 	 */
 	tag = _PrdmaTagGet(preq);
-	cc2 = FJMPI_Rdma_put(preq->peer, tag,
-		_prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	cc2 = FJMPI_Rdma_put(preq->WPEER, tag,
+		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
@@ -1587,8 +1614,8 @@ _PrdmaStart0(PrdmaReq *preq)
 	    tag = _PrdmaTagGet(preq);
 	    raddr = _prdmaDmaSyncConst
 		+ (preq->transff + PRDMA_SYNC_CNSTFF_0)*sizeof(uint32_t);
-	    cc1 = FJMPI_Rdma_put(preq->peer, tag,
-		 _prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	    cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
+		 _prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
 	    if (cc1 == 0) {
 #ifndef	MOD_PRDMA_LHP_TRC
@@ -2175,7 +2202,7 @@ static int	_prdmaDMAFlag[PRDMA_NIC_NPAT] = {
 static int
 _Prdma_NIC_init_cd03(PrdmaReq *preq)
 {
-    if (preq->peer == (_prdmaMyrank - 1)) {		/* West */
+    if (preq->WPEER == (_prdmaMyrank - 1)) {		/* West */
         if (preq->type == PRDMA_RTYPE_SEND) {
             preq->fidx = 0;
         }
@@ -2183,7 +2210,7 @@ _Prdma_NIC_init_cd03(PrdmaReq *preq)
             preq->fidx = 1;
         }
     }
-    else if (preq->peer == (_prdmaMyrank + 1)) {	/* East */
+    else if (preq->WPEER == (_prdmaMyrank + 1)) {	/* East */
         if (preq->type == PRDMA_RTYPE_SEND) {
             preq->fidx = 1;
         }
@@ -2191,7 +2218,7 @@ _Prdma_NIC_init_cd03(PrdmaReq *preq)
             preq->fidx = 0;
         }
     }
-    else if (preq->peer < _prdmaMyrank) {		/* North */
+    else if (preq->WPEER < _prdmaMyrank) {		/* North */
         if (preq->type == PRDMA_RTYPE_SEND) {
             preq->fidx = 2;
         }
@@ -2199,7 +2226,7 @@ _Prdma_NIC_init_cd03(PrdmaReq *preq)
             preq->fidx = 3;
         }
     }
-    else /* if (preq->peer > _prdmaMyrank) */ {		/* South */
+    else /* if (preq->WPEER > _prdmaMyrank) */ {		/* South */
         if (preq->type == PRDMA_RTYPE_SEND) {
             preq->fidx = 3;
         }
@@ -2367,7 +2394,7 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
 	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->peer, tag,
+	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
 	/*
@@ -2375,8 +2402,8 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	 * transaction
 	 */
 	tag = _PrdmaTagGet(preq);
-	cc2 = FJMPI_Rdma_put(preq->peer, tag,
-		_prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	cc2 = FJMPI_Rdma_put(preq->WPEER, tag,
+		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
@@ -2583,7 +2610,7 @@ _PrdmaTagGet(PrdmaReq *pr)
     int		ent, cent;
     int		retries = 0;
 
-    ent = ((pr->fidx & 0x03) + 1) * ((pr->peer & 0x03) + 1);
+    ent = ((pr->fidx & 0x03) + 1) * ((pr->WPEER & 0x03) + 1);
     if (ent >= PRDMA_TAG_MAX) {
 	ent = 0;
     }
@@ -2599,7 +2626,7 @@ retry:
 		break;
 	    }
 	    if (
-		(preq->peer == pr->peer)
+		(preq->WPEER == pr->WPEER)
 		&& (preq->fidx == pr->fidx)
 	    ) {
 		break;
@@ -2637,7 +2664,7 @@ _PrdmaTagFree(int nic, int tag, int pid)
     prev = &_prdmaTagTab[tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    && (preq->fidx == nic)
 	) {
 #ifdef	notyet
@@ -2675,7 +2702,7 @@ _PrdmaTag2Req(int nic, int tag, int pid)
     prev = &_prdmaTagTab[tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    && (preq->fidx == nic)
 	) {
 #ifdef	notyet
@@ -2724,9 +2751,9 @@ _PrdmaTagGet(PrdmaReq *pr)
     }
 #endif	/* notyet */
     ent =
-	  ((pr->peer & 0x0000000f) >>  0)
-	+ ((pr->peer & 0x000f0000) >> 16)
-	+ ((pr->peer & 0x0f000000) >> 24)
+	  ((pr->WPEER & 0x0000000f) >>  0)
+	+ ((pr->WPEER & 0x000f0000) >> 16)
+	+ ((pr->WPEER & 0x0f000000) >> 24)
 	;
     ent &= 0x0f;
     if ((ent < 0) || (ent >= PRDMA_TAG_MAX)) {
@@ -2744,7 +2771,7 @@ retry:
 		break;
 	    }
 	    if (
-		(preq->peer == pr->peer)
+		(preq->WPEER == pr->WPEER)
 		/* && (preq->fidx == nic) */
 	    ) {
 		break;
@@ -2799,7 +2826,7 @@ _PrdmaTagFree(int nic, int tag, int pid)
     prev = &_prdmaTagTab[nic][tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    /* && (preq->fidx == nic) */
 	) {
 #ifdef	notyet
@@ -2847,7 +2874,7 @@ _PrdmaTag2Req(int nic, int tag, int pid)
     prev = &_prdmaTagTab[nic][tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    /* && (preq->fidx == nic) */
 	) {
 #ifdef	notyet
@@ -2862,9 +2889,9 @@ _PrdmaTag2Req(int nic, int tag, int pid)
 		"\n",
 		tag, nic,
 		(found->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-			found->peer, found->fidx,
+			found->WPEER, found->fidx,
 		(preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-			preq->peer, preq->fidx
+			preq->WPEER, preq->fidx
 		);
 		PMPI_Abort(MPI_COMM_WORLD, -1);
 	    }
@@ -2936,7 +2963,7 @@ typedef struct PrdmaTrace {
 #endif	/* MOD_PRDMA_LHP_TRC_PST */
     unsigned int	 done;
 #ifdef	MOD_PRDMA_LHP_TRC_CD00A
-    int			 peer;
+    int			 WPEER;
     uint16_t		 uid;
     char		 fidx_l;
     char		 fidx_r;
@@ -3064,7 +3091,7 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 #endif	/* MOD_PRDMA_LHP_TRC_PST */
     ptrc->done = preq->done;
 #ifdef	MOD_PRDMA_LHP_TRC_CD00A
-    ptrc->peer = preq->peer;
+    ptrc->WPEER = preq->WPEER;
     ptrc->uid = preq->uid;
     ptrc->fidx_l = preq->fidx;
     ptrc->fidx_r = preq->rfidx;
@@ -3148,14 +3175,14 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, _prdmaTrace[ii].line, _prdmaMyrank, preq->uid,
 	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, preq->peer,
+	    _prdmaTrace[ii].done, preq->WPEER,
 	    preq->fidx, preq->rfidx);
 #else	/* MOD_PRDMA_LHP_TRC_CD00A */
 	fprintf(tfp, "%14.9f evnt %4d rank %2d ruid %2d type  %c "
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, _prdmaTrace[ii].line, _prdmaMyrank, _prdmaTrace[ii].uid,
 	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].WPEER,
 	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r);
 #endif	/* MOD_PRDMA_LHP_TRC_CD00A */
 #else	/* MOD_PRDMA_LHP_TRC_PST */
@@ -3164,7 +3191,7 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, buf, _prdmaMyrank, preq->uid,
 	    (preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, preq->peer,
+	    _prdmaTrace[ii].done, preq->WPEER,
 	    preq->fidx, preq->rfidx);
 #else	/* MOD_PRDMA_LHP_TRC_CD00A */
 #ifndef	MOD_PRDMA_LHP_TRC_CD00B
@@ -3172,14 +3199,14 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 	    "done %2d peer %2d flcl %2d frmt %2d\n",
 	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
 	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].WPEER,
 	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r);
 #else	/* MOD_PRDMA_LHP_TRC_CD00B */
 	fprintf(tfp, "%14.9f evnt %-17s rank %2d ruid %2d type  %c "
 	    "done %2d peer %2d flcl %2d frmt %2d size %7d\n",
 	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
 	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].WPEER,
 	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r,
 	    _prdmaTrace[ii].msiz);
 #endif	/* MOD_PRDMA_LHP_TRC_CD00B */
