@@ -1189,12 +1189,21 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
     if (preq == NULL) {
 	return 0;
     }
+#ifndef	MOD_PRDMA_MSC_FIX
     /* Needs remote memid to get the remote DMA address */
     MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE, dest,
 	      preq->tag, _prdmaInfoCom, &preq->negreq);
     /* Send the DMA address of synch entry to dest. */
     MPI_Bsend(&preq->lsync, sizeof(int),
 	      MPI_BYTE, dest, preq->tag, _prdmaMemidCom);
+#else	/* MOD_PRDMA_MSC_FIX */
+    /* Needs remote memid to get the remote DMA address */
+    MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom, &preq->negreq);
+    /* Send the DMA address of synch entry to dest. */
+    MPI_Bsend(&preq->lsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom);
+#endif	/* MOD_PRDMA_MSC_FIX */
     /* now testing the previous request to get the remote memid */
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) { 
@@ -1372,6 +1381,7 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
 #if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
     info._rfidx = preq->fidx;
 #endif	/* MOD_PRDMA_NIC_SEL */
+#ifndef	MOD_PRDMA_MSC_FIX
     MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE, source,
 	      preq->tag, _prdmaInfoCom);
     /*
@@ -1379,6 +1389,15 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
      */
     MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE, source,
 	      preq->tag, _prdmaMemidCom, &preq->negreq);
+#else	/* MOD_PRDMA_MSC_FIX */
+    MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom);
+    /*
+     * Needs memid of the synchronization variable in the sender
+     */
+    MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom, &preq->negreq);
+#endif	/* MOD_PRDMA_MSC_FIX */
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) {
 	/* The memid of the synchronization variable has been received */
