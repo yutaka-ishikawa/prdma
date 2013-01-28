@@ -1,16 +1,40 @@
-MPICC	=	mpifccpx
-CFLAGS	= -DFJ_MPI -O3 -Xg
-#MPICC	=	mpicc
-#CFLAGS	= -O3 -Wall -g
-RM	=	rm
+CC		= mpifccpx
+CFLAGS		= -Xg -g -O0 -G -KPIC
+#CFLAGS		= -Xg    -O3 -G -KPIC
+CPPFLAGS	= -DFJ_MPI
 
-prdma.o: prdma.c prdma.h timesync.h version.h
-	$(MPICC) $(CFLAGS) -c prdma.c
+#CC		= mpicc
+#CFLAGS		= -O3 -Wall -g -G -fPIC
+#RM		= rm -f
+
+# ======================================================
+
+L1_SRCS		= prdma.c
+L1_HDRS		= prdma.h timesync.h version.h
+L1_OBJS		= $(L1_SRCS:.c=.o)
+L1_LIB		= libprdma.so
+L1_MAP		= libprdma.map
+L1_LDFLAGS	= -Wl,--version-script,$(L1_MAP)
+
+OBJS		+= $(L1_OBJS)
+LIBS		+= $(L1_LIB)
+
+# ======================================================
+
+all:		$(LIBS) $(BINS)
+
+$(L1_LIB):	$(L1_OBJS) $(L1_MAP)
+		$(CC) $(CFLAGS) -o $(@) $(L1_OBJS) $(L1_LDFLAGS)
+
+prdma.o:	$(L1_HDRS)
 
 clean:
-	$(RM) -f *.o
-	$(RM) -f core.* run.sh.e* run.sh.i* run.sh.o*
+		$(RM) $(LIBS) $(BINS)
+		$(RM) $(OBJS)
+		$(RM) core.*
 
-tar:
-	tar cf 123.tar *.h *.c Makefile run.sh run-original.sh RESULT*
+# ======================================================
+
+tgz:
+		tar czf 123.tar.gz $(L1_SRCS) $(L1_HDRS) $(L1_MAP) Makefile
 
