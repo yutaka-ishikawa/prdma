@@ -1219,6 +1219,19 @@ _PrdmaSendInit(int *tover, void *buf, int count, MPI_Datatype datatype,
     int		lbid, worlddest, result, dsize;
     int		onecnt, rest, tcnt;
 
+#ifdef	MOD_PRDMA_MSC_FIX
+    switch (dest) {
+    case MPI_PROC_NULL:
+    case MPI_ANY_SOURCE:
+    case MPI_ROOT:
+	goto notake;
+    default:
+	if (dest < 0) {
+	    goto notake;
+	}
+	break;
+    }
+#endif	/* MOD_PRDMA_MSC_FIX */
     /* NEEDS Checking whether or not basic type !!!! */
     /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
@@ -1389,6 +1402,19 @@ MPI_Recv_init(void *buf, int count, MPI_Datatype datatype,
     int		onecnt, rest, tcnt;
     int		cc;
 
+#ifdef	MOD_PRDMA_MSC_FIX
+    switch (source) {
+    case MPI_PROC_NULL:
+    case MPI_ANY_SOURCE:
+    case MPI_ROOT:
+	goto notake;
+    default:
+	if (source < 0) {
+	    goto notake;
+	}
+	break;
+    }
+#endif	/* MOD_PRDMA_MSC_FIX */
     /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
     transsize = dsize*count;
