@@ -64,12 +64,8 @@ typedef enum {
     PRDMA_RSTATE_DONE = 8,
     PRDMA_RSTATE_RESTART = 9,
     PRDMA_RSTATE_ERROR = -1
-#ifdef	MOD_PRDMA_LHP_TRC
     , PRDMA_RSTATE_UNKNOWN = -2
-#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaRstate;
-#ifdef	MOD_PRDMA_LHP_TRC
-#ifdef	MOD_PRDMA_LHP_TRC_PST
 
 typedef struct PrdmaRst2Str {
     PrdmaRstate		sta;
@@ -91,8 +87,6 @@ typedef struct PrdmaRst2Str {
     { PRDMA_RSTATE_UNKNOWN,		"unknown"	}, \
     { PRDMA_RSTATE_UNKNOWN,		0		}  \
 }
-#endif	/* MOD_PRDMA_LHP_TRC_PST */
-#endif	/* MOD_PRDMA_LHP_TRC */
 
 /* offset is memid */
 typedef struct PrdmaDmaRegion {
@@ -106,20 +100,14 @@ typedef struct PrdmaDmaRegion {
 struct recvinfo {
     int			_rbid;		/* memid of remote buf */
     int			_rsync;		/* index of synchronization */
-#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
     int			_rfidx;		/* index of remote nic */
-#endif	/* MOD_PRDMA_NIC_SEL */
 };
 #define rbid	rinfo._rbid
 #define rsync	rinfo._rsync
-#if	defined(MOD_PRDMA_NIC_SEL) && defined(MOD_PRDMA_NIC_SEL_CD04)
 #define rfidx	rinfo._rfidx
-#endif	/* MOD_PRDMA_NIC_SEL */
-#ifdef	MOD_PRDMA_TAG_GET
 /* tag for FJMPI_Rdma_put() */
 #define PRDMA_TAG_MAX		15
 #define PRDMA_TAG_START		1
-#endif	/* MOD_PRDMA_TAG_GET */
 
 typedef struct PrdmaReq {
     struct PrdmaReq	*next;		/* link to the same hash key */
@@ -146,19 +134,11 @@ typedef struct PrdmaReq {
     int			tag;
     MPI_Comm		comm;
     MPI_Request		*req;
-#ifdef	MOD_PRDMA_NIC_SEL
     int			fidx;
     int			flag;
-#endif	/* MOD_PRDMA_NIC_SEL */
-#ifdef	MOD_PRDMA_SYN_MBL
     int			sndst;
-#endif	/* MOD_PRDMA_SYN_MBL */
-#ifdef	MOD_PRDMA_TAG_GET
     struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
-#endif	/* MOD_PRDMA_TAG_GET */
-#ifdef	MOD_PRDMA_LHP_TRC
     unsigned int	done;
-#endif	/* MOD_PRDMA_LHP_TRC */
 } PrdmaReq;
 
 #define PRDMA_MEMID_MAX		510
@@ -168,10 +148,6 @@ typedef struct PrdmaReq {
 #define PRDMA_DMA_REGSSTART	(PRDMA_MEMID_SYNC + 1)
 #define PRDMA_DMA_HTABSIZE	512
 #define PRDMA_DMA_MAXSIZE	(16777216 - 4)	/* 2^24 - 4 */
-#ifndef	MOD_PRDMA_TAG_GET
-#define PRDMA_TAG_MAX		15
-#define PRDMA_TAG_START		1
-#endif	/* MOD_PRDMA_TAG_GET */
 
 #define PRDMA_REQ_HTABSIZE	1024
 #define PRDMA_REQ_STARTUID	10  /* uid must exclude MPI_REQUEST_NULL */
@@ -187,9 +163,6 @@ typedef struct PrdmaReq {
 #define PRDMA_SYNC_CNSTFF_0	1
 #define PRDMA_SYNC_CNSTFF_1	2
 #define PRDMA_SYNC_CNSTSIZE	4
-#ifndef	MOD_PRDMA_TUN_PRM_SYN
-#define PRDMA_NSYNC_PERPROC	8		/* O(N) */
-#endif	/* MOD_PRDMA_TUN_PRM_SYN */
 
 #define PRDMA_FIND_ANY		1
 #define PRDMA_FIND_ALL		2
@@ -226,7 +199,6 @@ typedef struct PrdmaReq {
     pq->req = rq;					\
 }
 
-#ifdef	MOD_PRDMA_NIC_SEL
 /*
  * interconnect nic selection
  */
@@ -239,9 +211,7 @@ extern prdma_nic_cb_f	_prdma_nic_init;
 extern prdma_nic_cb_f	_prdma_nic_sync;
 extern prdma_nic_cb_f	_prdma_nic_getf;
 
-#endif	/* MOD_PRDMA_NIC_SEL */
 
-#ifdef	MOD_PRDMA_SYN_MBL
 /*
  * synchronization by multi-request busy loop
  */
@@ -254,19 +224,13 @@ typedef int (*prdma_syn_wt_f)(int nreq, MPI_Request *reqs);
 extern prdma_syn_cb_f	_prdma_syn_send;
 extern prdma_syn_wt_f	_prdma_syn_wait;
 
-#endif	/* MOD_PRDMA_SYN_MBL */
 
-#ifdef	MOD_PRDMA_LHP_TRC
 /*
  * light-weight and high precision trace
  */
 typedef int (*prdma_trc_cb_f)(int tracesize);
-#ifndef	MOD_PRDMA_LHP_TRC_PST
-typedef int (*prdma_trc_pt_f)(PrdmaReq *preq, int code);
-#else	/* MOD_PRDMA_LHP_TRC_PST */
 typedef int (*prdma_trc_pt_f)(PrdmaReq *preq,
 		PrdmaRstate rsta, int ssta, int line);
-#endif	/* MOD_PRDMA_LHP_TRC_PST */
 
 /*
  * callback functions
@@ -276,4 +240,3 @@ extern prdma_trc_cb_f	_prdma_trc_fini;
 extern prdma_trc_pt_f	_prdma_trc_wlog;
 extern prdma_trc_pt_f	_prdma_trc_rlog;
 
-#endif	/* MOD_PRDMA_LHP_TRC */
