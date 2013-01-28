@@ -42,6 +42,7 @@
 #ifdef	USE_PRDMA_MSGSTAT
 #define PRDMA_MSGSTAT_SIZE	1024
 #endif	/* USE_PRDMA_MSGSTAT */
+#define PRDMA_SYNC_SIZE	512
 
 /* interconnect nic selection */
 /* determine the order of nic usage */
@@ -52,6 +53,11 @@
 /* light-weight and high precision prdma-protocol trace */
 /* fix of MPI_Request_f2c() */
 /* release information */
+/* synchronization can be postponed */
+/* miscellaneous fixes */
+
+#define WPEERW	wpeer
+#define WPEER	WPEERW
 
 #include "prdma.h"
 #include "timesync.h"
@@ -75,6 +81,8 @@ int	_prdmaRdmaSize	= PRDMA_SIZE;
 int	_prdmaMTU = 1024*1024;
 int	_prdmaTraceSize = 0;
 int	_prdmaTraceType = 0;
+int	_prdmaSyncSize = PRDMA_SYNC_SIZE;
+int	_prdmaStartTimeout = 0;
 
 static MPI_Comm		_prdmaInfoCom;
 static MPI_Comm		_prdmaMemidCom;
@@ -99,6 +107,7 @@ static PrdmaMsgStat	_prdmaSendstat[PRDMA_MSGSTAT_SIZE];
 static PrdmaMsgStat	_prdmaRecvstat[PRDMA_MSGSTAT_SIZE];
 #endif	/* USE_PRDMA_MSGSTAT */
 static uint64_t		_prdma_sl, _prdma_sr, _prdma_el, _prdma_er;
+static uint64_t		_prdma_to_tsc = 0; /* timeout time stamp counter */
 /*
  * dummy MPI_Request structure for MPI_Request_f2c()
  */
@@ -139,17 +148,17 @@ int
 _PrdmaGetCommWorldRank(MPI_Comm mycomm, int myrank)
 {
     MPI_Group	worldgrp, mygrp;
-    int		worldrank;
+    int		WPEERW;
 
     MPI_Comm_group(MPI_COMM_WORLD, &worldgrp);
     MPI_Comm_group(mycomm, &mygrp);
 
-    MPI_Group_translate_ranks(mygrp, 1, &myrank, worldgrp, &worldrank);
+    MPI_Group_translate_ranks(mygrp, 1, &myrank, worldgrp, &WPEERW);
 
     MPI_Group_free(&mygrp);
     MPI_Group_free(&worldgrp);
 
-    return worldrank;
+    return WPEERW;
 }
 
 
@@ -240,11 +249,11 @@ _PrdmaAddrHashKey(void *addr)
 }
 
 static void
-_PrdmaCheckRdmaSync(int peer)
+_PrdmaCheckRdmaSync(int WPEER)
 {
-    if (_prdmaRdmaSync[peer] == 0) {
-	_prdmaRdmaSync[peer]
-	    = FJMPI_Rdma_get_remote_addr(peer,PRDMA_MEMID_SYNC);
+    if (_prdmaRdmaSync[WPEER] == 0) {
+	_prdmaRdmaSync[WPEER]
+	    = FJMPI_Rdma_get_remote_addr(WPEER,PRDMA_MEMID_SYNC);
     }
 }
 
@@ -286,7 +295,7 @@ _PrdmaReqRegister(PrdmaReq *pr)
     PrdmaReq	*pq, *opq;
 
     if (_prdmaNumReq > PRDMA_REQ_MAXREQ) {
-	MPI_Abort(MPI_COMM_WORLD, -1);
+	_prdmaErrorExit(1);
 	return -1;
     }
 retry:
@@ -487,8 +496,10 @@ static struct PrdmaOptions _poptions[] = {
     { "PRDMA_VERBOSE", &_prdmaVerbose },
     { "PRDMA_STATISTIC", &_prdmaStat },
     { "PRDMA_RDMASIZE", &_prdmaRdmaSize },
+    { "PRDMA_SYNCSIZE", &_prdmaSyncSize },
     { "PRDMA_TRACESIZE", &_prdmaTraceSize },
     { "PRDMA_TRACETYPE", &_prdmaTraceType },
+    { "PRDMA_STARTTOUT", &_prdmaStartTimeout },
     { 0, 0 }
 };
 
@@ -572,7 +583,14 @@ _PrdmaInit()
     MPI_Comm_dup(MPI_COMM_WORLD, &_prdmaMemidCom);
     FJMPI_Rdma_init();
     /* Synchronization structure is initialized */
-    _prdmaMaxSync = _prdmaNprocs * PRDMA_NSYNC_PERPROC;
+    {
+	/* from _PrdmaOptions() */
+	const char *cp = getenv("PRDMA_SYNCSIZE");
+	if (cp) {
+	    _prdmaSyncSize = atoi(cp);
+	}
+	_prdmaMaxSync = (_prdmaSyncSize < 8)? 8: _prdmaSyncSize;
+    }
     size = sizeof(uint32_t)*_prdmaMaxSync;
     _prdmaSync = malloc(size);
     _prdmaRdmaSync= malloc(sizeof(uint64_t)*_prdmaNprocs);
@@ -607,6 +625,20 @@ _PrdmaInit()
 	if (_prdma_trc_init != NULL) {
 	    (*_prdma_trc_init)(_prdmaTraceSize);
 	    timesync_sync(&_prdma_sl, &_prdma_sr);
+	}
+    }
+    {
+	if (_prdmaStartTimeout <= 0) { /* in micro sec */
+	    _prdma_to_tsc = 0;
+	}
+	else {
+	    int64_t hz = 0;
+	    hz = timesync_gethz();
+	    if (hz <= 0) {
+		hz = 2000UL * 1000 * 1000;
+	    }
+	    _prdma_to_tsc = _prdmaStartTimeout * hz
+				/ (1000 * 1000);
 	}
     }
 
@@ -721,6 +753,27 @@ _PrdmaMultiTest0(MPI_Request *req, PrdmaReq *top, int *flag)
 	    _prdmaErrorExit(3);
 	    continue;
 	}
+	if (
+	    (preq->state == PRDMA_RSTATE_PREPARED)
+	    || (preq->state == PRDMA_RSTATE_RESTART)
+	) {
+	    /* MPI_Start() or MPI_Startall() have not been called */
+	    if (preq->raddr == (uint64_t) -1) {
+		continue;
+	    }
+	    if (_prdma_syn_send != NULL) {
+		int ret;
+		if (preq->sndst == 0 /* dosync */) {
+		    ret = (*_prdma_syn_send)(preq);
+		    if (ret <= 0) {
+			continue;
+		    }
+		}
+		/* dosend : (preq->sndst == 1) */
+		ret = (*_prdma_syn_send)(preq);
+		/* ret == 0 ; why? */
+	    }
+	}
 	/* PRDMA transaction */
 	if (preq->state != PRDMA_RSTATE_DONE) {
 	    if (_PrdmaTest(preq, 0) == 0) continue;  /* still progress */
@@ -807,7 +860,7 @@ _PrdmaOneCount(int count, int dsize, size_t transsize)
 
 
 PrdmaReq	*
-_PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
+_PrdmaReqCommonSetup(PrdmaRtype type, int WPEERW, size_t transsize,
 		     int transcount, int lbid, uint64_t	lbaddr,
 		     void *buf, int count,
 		     MPI_Datatype datatype, int peer, int tag,
@@ -825,14 +878,14 @@ _PrdmaReqCommonSetup(PrdmaRtype type, int worldrank, size_t transsize,
 	return 0;
     }
     /* checking if the synchronization structure has been obtained */
-    _PrdmaCheckRdmaSync(worldrank);
+    _PrdmaCheckRdmaSync(WPEERW);
     /*
      * All required resources have been allocated.
      */
     /* MPI arguments are stored */
     PRDMA_SET_REQ(preq, buf, count, datatype, peer, tag, comm, request);
     preq->size = transsize;	/* transfer size in byte */
-    preq->worldrank = worldrank;/* peer rank in COMM_WORLD_COMM */
+    preq->WPEERW = WPEERW;/* peer rank in COMM_WORLD_COMM */
     preq->transcnt = transcount;/* actual count in this request */
     preq->lbid = lbid;		/* memid of local comm. buffer */
     preq->lbaddr = lbaddr;	/* dma address of local comm. buffer */
@@ -864,11 +917,11 @@ _PrdmaSendInit0(int worlddest, size_t transsize, int transcount,
 	return 0;
     }
     /* Needs remote memid to get the remote DMA address */
-    MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE, dest,
-	      preq->tag, _prdmaInfoCom, &preq->negreq);
+    MPI_Irecv(&preq->rinfo, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom, &preq->negreq);
     /* Send the DMA address of synch entry to dest. */
-    MPI_Bsend(&preq->lsync, sizeof(int),
-	      MPI_BYTE, dest, preq->tag, _prdmaMemidCom);
+    MPI_Bsend(&preq->lsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom);
     /* now testing the previous request to get the remote memid */
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) { 
@@ -895,6 +948,17 @@ _PrdmaSendInit(int *tover, void *buf, int count, MPI_Datatype datatype,
     int		lbid, worlddest, result, dsize;
     int		onecnt, rest, tcnt;
 
+    switch (dest) {
+    case MPI_PROC_NULL:
+    case MPI_ANY_SOURCE:
+    case MPI_ROOT:
+	goto notake;
+    default:
+	if (dest < 0) {
+	    goto notake;
+	}
+	break;
+    }
     /* NEEDS Checking whether or not basic type !!!! */
     /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
@@ -959,6 +1023,17 @@ MPI_Init(int *argc, char ***argv)
 }
 
 int
+MPI_Init_thread(int *argc, char ***argv, int required, int *provided)
+{
+    int		cc;
+
+    cc = PMPI_Init_thread(argc, argv, required, provided);
+    if (cc != MPI_SUCCESS) return cc;
+    _PrdmaInit();
+    return MPI_SUCCESS;
+}
+
+int
 MPI_Finalize()
 {
     int		cc;
@@ -1008,13 +1083,13 @@ _PrdmaRecvInit0(int worlddest, size_t transsize, int transcount, int lbid,
     info._rbid = preq->lbid;
     info._rsync = preq->lsync;
     info._rfidx = preq->fidx;
-    MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE, source,
-	      preq->tag, _prdmaInfoCom);
+    MPI_Bsend(&info, sizeof(struct recvinfo), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaInfoCom);
     /*
      * Needs memid of the synchronization variable in the sender
      */
-    MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE, source,
-	      preq->tag, _prdmaMemidCom, &preq->negreq);
+    MPI_Irecv(&preq->rsync, sizeof(int), MPI_BYTE,
+	preq->WPEER, preq->tag, _prdmaMemidCom, &preq->negreq);
     MPI_Test(&preq->negreq, &flag, &stat);
     if (flag) {
 	/* The memid of the synchronization variable has been received */
@@ -1040,6 +1115,17 @@ MPI_Recv_init(void *buf, int count, MPI_Datatype datatype,
     int		onecnt, rest, tcnt;
     int		cc;
 
+    switch (source) {
+    case MPI_PROC_NULL:
+    case MPI_ANY_SOURCE:
+    case MPI_ROOT:
+	goto notake;
+    default:
+	if (source < 0) {
+	    goto notake;
+	}
+	break;
+    }
     /* Checking data transfer size */
     MPI_Type_size(datatype, &dsize);
     transsize = dsize*count;
@@ -1121,7 +1207,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	if (_prdma_syn_send != NULL) {
 	    /* remote address */
 	    if (preq->raddr == (uint64_t) -1) {
-		preq->raddr = FJMPI_Rdma_get_remote_addr(preq->peer, preq->rbid);
+		preq->raddr = FJMPI_Rdma_get_remote_addr(preq->WPEER, preq->rbid);
 	    }
 	    preq->transff ^= PRDMA_SYNC_FLIP;
 	    preq->sndst = 0; /* dosync */
@@ -1131,7 +1217,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	/* remote address */
 	idx = preq->lsync;
 	if (preq->raddr == (uint64_t) -1) {
-	    preq->raddr = FJMPI_Rdma_get_remote_addr(preq->peer, preq->rbid);
+	    preq->raddr = FJMPI_Rdma_get_remote_addr(preq->WPEER, preq->rbid);
 	}
 	preq->transff ^= PRDMA_SYNC_FLIP;
 	if (_prdmaNosync == 0) {
@@ -1144,7 +1230,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	/* start DMA */
 	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->peer, tag,
+	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
 	/*
@@ -1152,8 +1238,8 @@ _PrdmaStart0(PrdmaReq *preq)
 	 * transaction
 	 */
 	tag = _PrdmaTagGet(preq);
-	cc2 = FJMPI_Rdma_put(preq->peer, tag,
-		_prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	cc2 = FJMPI_Rdma_put(preq->WPEER, tag,
+		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
@@ -1174,8 +1260,8 @@ _PrdmaStart0(PrdmaReq *preq)
 	    tag = _PrdmaTagGet(preq);
 	    raddr = _prdmaDmaSyncConst
 		+ (preq->transff + PRDMA_SYNC_CNSTFF_0)*sizeof(uint32_t);
-	    cc1 = FJMPI_Rdma_put(preq->peer, tag,
-		 _prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	    cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
+		 _prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
 	    if (cc1 == 0) {
 		_PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
@@ -1646,7 +1732,7 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
 	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->peer, tag,
+	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
 	/*
@@ -1654,8 +1740,8 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	 * transaction
 	 */
 	tag = _PrdmaTagGet(preq);
-	cc2 = FJMPI_Rdma_put(preq->peer, tag,
-		_prdmaRdmaSync[preq->peer] + preq->rsync*sizeof(uint32_t),
+	cc2 = FJMPI_Rdma_put(preq->WPEER, tag,
+		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
 	if (cc1 == 0 && cc2 == 0) {
@@ -1678,8 +1764,12 @@ static int
 _Prdma_Syn_wait(int nreq, MPI_Request *reqs)
 {
     int ir;
+    uint64_t ts, te;
     int doretry;
 
+    if (_prdma_to_tsc > 0) {
+	ts = timesync_rdtsc();
+    }
 retry:
     doretry = 0;
     for (ir = 0; ir < nreq; ir++) {
@@ -1720,7 +1810,13 @@ retry:
 	
     }
     if (doretry > 0) {
-	goto retry;
+	if (_prdma_to_tsc <= 0) {
+	    goto retry;
+	}
+	te = timesync_rdtsc();
+	if ((te - ts) < _prdma_to_tsc) {
+	    goto retry;
+	}
     }
     return MPI_SUCCESS;
 }
@@ -1751,9 +1847,9 @@ _PrdmaTagGet(PrdmaReq *pr)
     }
 #endif	/* notyet */
     ent =
-	  ((pr->peer & 0x0000000f) >>  0)
-	+ ((pr->peer & 0x000f0000) >> 16)
-	+ ((pr->peer & 0x0f000000) >> 24)
+	  ((pr->WPEER & 0x0000000f) >>  0)
+	+ ((pr->WPEER & 0x000f0000) >> 16)
+	+ ((pr->WPEER & 0x0f000000) >> 24)
 	;
     ent &= 0x0f;
     if ((ent < 0) || (ent >= PRDMA_TAG_MAX)) {
@@ -1771,7 +1867,7 @@ retry:
 		break;
 	    }
 	    if (
-		(preq->peer == pr->peer)
+		(preq->WPEER == pr->WPEER)
 		/* && (preq->fidx == nic) */
 	    ) {
 		break;
@@ -1826,7 +1922,7 @@ _PrdmaTagFree(int nic, int tag, int pid)
     prev = &_prdmaTagTab[nic][tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    /* && (preq->fidx == nic) */
 	) {
 #ifdef	notyet
@@ -1874,7 +1970,7 @@ _PrdmaTag2Req(int nic, int tag, int pid)
     prev = &_prdmaTagTab[nic][tag /* ent */];
     while ((preq = *prev) != 0) {
 	if (
-	    (preq->peer == pid)
+	    (preq->WPEER == pid)
 	    /* && (preq->fidx == nic) */
 	) {
 #ifdef	notyet
@@ -1889,9 +1985,9 @@ _PrdmaTag2Req(int nic, int tag, int pid)
 		"\n",
 		tag, nic,
 		(found->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-			found->peer, found->fidx,
+			found->WPEER, found->fidx,
 		(preq->type == PRDMA_RTYPE_SEND)? 'S': 'R',
-			preq->peer, preq->fidx
+			preq->WPEER, preq->fidx
 		);
 		PMPI_Abort(MPI_COMM_WORLD, -1);
 	    }
@@ -1947,13 +2043,14 @@ typedef struct PrdmaTrace {
     char                 ssta;
     unsigned short	 line;
     unsigned int	 done;
-    int			 peer;
+    int			 WPEER;
     uint16_t		 uid;
     char		 fidx_l;
     char		 fidx_r;
     uint16_t		 rsv16;
     char		 type;
     uint8_t		 rsv8;
+    unsigned int	 msiz;
 } PrdmaTrace;
 
 static PrdmaTrace	*_prdmaTrace = 0;
@@ -2037,11 +2134,12 @@ _Prdma_Trc_wlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
     ptrc->ssta = (char) ssta;
     ptrc->line = (unsigned short)line;
     ptrc->done = preq->done;
-    ptrc->peer = preq->peer;
+    ptrc->WPEER = preq->WPEER;
     ptrc->uid = preq->uid;
     ptrc->fidx_l = preq->fidx;
     ptrc->fidx_r = preq->rfidx;
     ptrc->type = preq->type;
+    ptrc->msiz = preq->size;
 
     return 0;
 }
@@ -2090,13 +2188,15 @@ _Prdma_Trc_rlog_cd00(PrdmaReq *preq, PrdmaRstate rsta, int ssta, int line)
 		_prdma_el, _prdma_er, _prdmaTrace[ii].time);
 	}
 	fprintf(tfp, "%14.9f evnt %-17s rank %2d ruid %2d type  %c "
-	    "done %2d peer %2d flcl %2d frmt %2d\n",
+	    "done %2d peer %2d flcl %2d frmt %2d size %7d\n",
 	    dv, buf, _prdmaMyrank, _prdmaTrace[ii].uid,
 	    (_prdmaTrace[ii].type == PRDMA_RTYPE_SEND)? 'S': 'R',
-	    _prdmaTrace[ii].done, _prdmaTrace[ii].peer,
-	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r);
+	    _prdmaTrace[ii].done, _prdmaTrace[ii].WPEER,
+	    _prdmaTrace[ii].fidx_l, _prdmaTrace[ii].fidx_r,
+	    _prdmaTrace[ii].msiz);
     } while (++ii != ix);
 
+    fflush(tfp);
     return 0;
 }
 
