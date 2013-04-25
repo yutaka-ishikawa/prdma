@@ -55,9 +55,43 @@
 /* release information */
 /* synchronization can be postponed */
 /* miscellaneous fixes */
+/* maximum message size fixes */
 
 #define WPEERW	wpeer
 #define WPEER	WPEERW
+/* Maximum Transfer Unit (16MB) */
+#define TOFU_MTU	(1 << 24)
+/* fragment put macro */
+#define FJMPI_RDMA_FPUT(PREQ, FLG, RET) \
+    { \
+	uint64_t ra = (PREQ)->raddr; \
+	uint64_t la = (PREQ)->lbaddr; \
+	size_t sz = (PREQ)->size; \
+	int mtag; \
+	\
+	RET = 0; \
+	while ((sz >= TOFU_MTU) && (RET == 0)) { \
+	    mtag = _PrdmaTagGet(PREQ); \
+	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
+			ra, la, TOFU_MTU >> 1, FLG); \
+	    if (RET == 0) { \
+		ra += (TOFU_MTU >> 1); la += (TOFU_MTU >> 1); \
+		sz -= (TOFU_MTU >> 1); \
+		(PREQ)->pend++; \
+	    } \
+	    else { _PrdmaTagFree((PREQ)->fidx, mtag, (PREQ)->WPEER); } \
+	} \
+	if ((sz > 0) && (RET == 0)) { \
+	    mtag = _PrdmaTagGet(PREQ); \
+	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
+			ra, la, sz, FLG); \
+	    if (RET == 0) { \
+		/* ra += sz; la += sz; sz -= sz; */ \
+		(PREQ)->pend++; \
+	    } \
+	    else { _PrdmaTagFree((PREQ)->fidx, mtag, (PREQ)->WPEER); } \
+	} \
+    }
 
 #include "prdma.h"
 #include "timesync.h"
@@ -661,9 +695,15 @@ _PrdmaCQpoll()
 	    preq = _PrdmaTag2Req(i /* nic */, cq.tag, cq.pid);
 	    if (preq == 0) break;
 	    if (preq->type == PRDMA_RTYPE_SEND) {
-		if (preq->state == PRDMA_RSTATE_START) {
+		if (
+		    preq->state == PRDMA_RSTATE_START
+		    && (preq->pend > 1)
+		) {
 		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SENT_DATA, -1);
-		} else if (preq->state == PRDMA_RSTATE_SENDER_SENT_DATA) {
+		} else if (
+		    preq->state == PRDMA_RSTATE_SENDER_SENT_DATA
+		    && (preq->pend == 1)
+		) {
 		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SEND_DONE, -1);
 		} else {
 		    _PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, -1);
@@ -1229,10 +1269,7 @@ _PrdmaStart0(PrdmaReq *preq)
 	}
 	/* start DMA */
 	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
-	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
-			     preq->raddr, preq->lbaddr,
-			     preq->size, flag);
+	FJMPI_RDMA_FPUT(preq, flag, cc1);
 	/*
 	 * Make sure the ordering of the above transaction and the following
 	 * transaction
@@ -1242,6 +1279,8 @@ _PrdmaStart0(PrdmaReq *preq)
 		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
+	if (cc2 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
 	if (cc1 == 0 && cc2 == 0) {
 	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	} else {
@@ -1263,6 +1302,8 @@ _PrdmaStart0(PrdmaReq *preq)
 	    cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 		 _prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
+	    if (cc1 == 0) { preq->pend++; }
+	    else { _PrdmaTagFree(preq->fidx, tag, preq->WPEER); }
 	    if (cc1 == 0) {
 		_PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	    } else {
@@ -1731,10 +1772,7 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
-	tag = _PrdmaTagGet(preq);
-	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
-			     preq->raddr, preq->lbaddr,
-			     preq->size, flag);
+	FJMPI_RDMA_FPUT(preq, flag, cc1);
 	/*
 	 * Make sure the ordering of the above transaction and the following
 	 * transaction
@@ -1744,6 +1782,8 @@ _Prdma_Syn_send(PrdmaReq *preq)
 		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
+	if (cc2 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
 	if (cc1 == 0 && cc2 == 0) {
 	    _PrdmaChangeState(preq, PRDMA_RSTATE_START, -1);
 	    ret = 1;
@@ -1942,6 +1982,7 @@ _PrdmaTagFree(int nic, int tag, int pid)
 	preq = found[0];
 	found[0] = preq->tnxt[tag];
 	preq->tnxt[tag] = 0;
+	preq->pend--;
     }
 #ifndef	notyet
     else {

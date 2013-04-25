@@ -1,10 +1,10 @@
 CC		= mpifccpx
-CFLAGS		= -Xg -g -O0 -G -KPIC
-#CFLAGS		= -Xg    -O3 -G -KPIC
+CFLAGS		= -Xg -g -O0 -KPIC
+#CFLAGS		= -Xg    -O3 -KPIC
 CPPFLAGS	= -DFJ_MPI
 
 #CC		= mpicc
-#CFLAGS		= -O3 -Wall -g -G -fPIC
+#CFLAGS		= -O3 -Wall -g -fPIC
 #RM		= rm -f
 
 # ======================================================
@@ -14,7 +14,7 @@ L1_HDRS		= prdma.h timesync.h version.h
 L1_OBJS		= $(L1_SRCS:.c=.o)
 L1_LIB		= libprdma.so
 L1_MAP		= libprdma.map
-L1_LDFLAGS	= -Wl,--version-script,$(L1_MAP)
+L1_LDFLAGS	= -shared -Wl,--version-script,$(L1_MAP)
 
 OBJS		+= $(L1_OBJS)
 LIBS		+= $(L1_LIB)

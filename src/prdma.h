@@ -138,6 +138,7 @@ typedef struct PrdmaReq {
     int			flag;
     int			sndst;
     struct PrdmaReq	*tnxt[PRDMA_TAG_MAX];	/* tag next */
+    int			pend;
     unsigned int	done;
 } PrdmaReq;
 
