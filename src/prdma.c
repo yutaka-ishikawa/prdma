@@ -118,14 +118,22 @@
 	    mtag = _PrdmaTagGet(PREQ); \
 	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
 			ra, la, TOFU_MTU >> 1, FLG); \
-	    ra += (TOFU_MTU >> 1); la += (TOFU_MTU >> 1); \
-	    sz -= (TOFU_MTU >> 1); \
+	    if (RET == 0) { \
+		ra += (TOFU_MTU >> 1); la += (TOFU_MTU >> 1); \
+		sz -= (TOFU_MTU >> 1); \
+		(PREQ)->pend++; \
+	    } \
+	    else { _PrdmaTagFree((PREQ)->fidx, mtag, (PREQ)->WPEER); } \
 	} \
 	if ((sz > 0) && (RET == 0)) { \
 	    mtag = _PrdmaTagGet(PREQ); \
 	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
 			ra, la, sz, FLG); \
-	    /* ra += sz; la += sz; sz -= sz; */ \
+	    if (RET == 0) { \
+		/* ra += sz; la += sz; sz -= sz; */ \
+		(PREQ)->pend++; \
+	    } \
+	    else { _PrdmaTagFree((PREQ)->fidx, mtag, (PREQ)->WPEER); } \
 	} \
     }
 #endif	/* MOD_PRDMA_MMS_FIX */
@@ -912,13 +920,23 @@ _PrdmaCQpoll()
 #endif	/* MOD_PRDMA_TAG_GET */
 	    if (preq == 0) break;
 	    if (preq->type == PRDMA_RTYPE_SEND) {
-		if (preq->state == PRDMA_RSTATE_START) {
+		if (
+		    preq->state == PRDMA_RSTATE_START
+#ifdef	MOD_PRDMA_TAG_GET
+		    && (preq->pend > 1)
+#endif	/* MOD_PRDMA_TAG_GET */
+		) {
 #ifndef	MOD_PRDMA_LHP_TRC
 		    preq->state = PRDMA_RSTATE_SENDER_SENT_DATA;
 #else	/* MOD_PRDMA_LHP_TRC */
 		    _PrdmaChangeState(preq, PRDMA_RSTATE_SENDER_SENT_DATA, -1);
 #endif	/* MOD_PRDMA_LHP_TRC */
-		} else if (preq->state == PRDMA_RSTATE_SENDER_SENT_DATA) {
+		} else if (
+		    preq->state == PRDMA_RSTATE_SENDER_SENT_DATA
+#ifdef	MOD_PRDMA_TAG_GET
+		    && (preq->pend == 1)
+#endif	/* MOD_PRDMA_TAG_GET */
+		) {
 #ifndef	MOD_PRDMA_LHP_TRC
 		    preq->state = PRDMA_RSTATE_SENDER_SEND_DONE;
 #else	/* MOD_PRDMA_LHP_TRC */
@@ -1605,6 +1623,10 @@ _PrdmaStart0(PrdmaReq *preq)
 	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
+#ifdef	MOD_PRDMA_TAG_GET
+	if (cc1 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
+#endif	/* MOD_PRDMA_TAG_GET */
 #else	/* MOD_PRDMA_MMS_FIX */
 	FJMPI_RDMA_FPUT(preq, flag, cc1);
 #endif	/* MOD_PRDMA_MMS_FIX */
@@ -1617,6 +1639,10 @@ _PrdmaStart0(PrdmaReq *preq)
 		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
+#ifdef	MOD_PRDMA_TAG_GET
+	if (cc2 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
+#endif	/* MOD_PRDMA_TAG_GET */
 	if (cc1 == 0 && cc2 == 0) {
 #ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_START;
@@ -1650,6 +1676,10 @@ _PrdmaStart0(PrdmaReq *preq)
 	    cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 		 _prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 				 raddr,  sizeof(int), flag);
+#ifdef	MOD_PRDMA_TAG_GET
+	    if (cc1 == 0) { preq->pend++; }
+	    else { _PrdmaTagFree(preq->fidx, tag, preq->WPEER); }
+#endif	/* MOD_PRDMA_TAG_GET */
 	    if (cc1 == 0) {
 #ifndef	MOD_PRDMA_LHP_TRC
 		preq->state = PRDMA_RSTATE_START;
@@ -2431,6 +2461,10 @@ _Prdma_Syn_send(PrdmaReq *preq)
 	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
+#ifdef	MOD_PRDMA_TAG_GET
+	if (cc1 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
+#endif	/* MOD_PRDMA_TAG_GET */
 #else	/* MOD_PRDMA_MMS_FIX */
 	FJMPI_RDMA_FPUT(preq, flag, cc1);
 #endif	/* MOD_PRDMA_MMS_FIX */
@@ -2443,6 +2477,10 @@ _Prdma_Syn_send(PrdmaReq *preq)
 		_prdmaRdmaSync[preq->WPEER] + preq->rsync*sizeof(uint32_t),
 	        _prdmaDmaSyncConst + sizeof(uint32_t)*PRDMA_SYNC_CNSTMARKER,
 		sizeof(int), flag);
+#ifdef	MOD_PRDMA_TAG_GET
+	if (cc2 == 0) { preq->pend++; }
+	else { _PrdmaTagFree(preq->fidx /*nic*/, tag, preq->WPEER /*pid*/); }
+#endif	/* MOD_PRDMA_TAG_GET */
 	if (cc1 == 0 && cc2 == 0) {
 #ifndef	MOD_PRDMA_LHP_TRC
 	    preq->state = PRDMA_RSTATE_START;
@@ -2883,6 +2921,7 @@ _PrdmaTagFree(int nic, int tag, int pid)
 	preq = found[0];
 	found[0] = preq->tnxt[tag];
 	preq->tnxt[tag] = 0;
+	preq->pend--;
     }
 #ifndef	notyet
     else {
