@@ -43,6 +43,7 @@ my_unifdef()
 	-DMOD_PRDMA_REL_INF \
 	-DMOD_PRDMA_SYN_PPD \
 	-DMOD_PRDMA_MSC_FIX \
+	-DMOD_PRDMA_MMS_FIX \
 	${1}
 }
 
@@ -80,6 +81,7 @@ my_sed()
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_REL_INF/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_SYN_PPD/d' \
 	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_MSC_FIX/d' \
+	-e '/#[ 	]*define[ 	][ 	]*MOD_PRDMA_MMS_FIX/d' \
 	${1}
 }
 

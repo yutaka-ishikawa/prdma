@@ -92,6 +92,8 @@
 #define MOD_PRDMA_SYN_PPD
 /* miscellaneous fixes */
 #define MOD_PRDMA_MSC_FIX
+/* maximum message size fixes */
+#define MOD_PRDMA_MMS_FIX
 
 #ifndef	MOD_PRDMA_MSC_FIX
 #define WPEERW	worldrank
@@ -100,6 +102,33 @@
 #define WPEERW	wpeer
 #define WPEER	WPEERW
 #endif	/* MOD_PRDMA_MSC_FIX */
+#ifdef	MOD_PRDMA_MMS_FIX
+/* Maximum Transfer Unit (16MB) */
+#define TOFU_MTU	(1 << 24)
+/* fragment put macro */
+#define FJMPI_RDMA_FPUT(PREQ, FLG, RET) \
+    { \
+	uint64_t ra = (PREQ)->raddr; \
+	uint64_t la = (PREQ)->lbaddr; \
+	size_t sz = (PREQ)->size; \
+	int mtag; \
+	\
+	RET = 0; \
+	while ((sz >= TOFU_MTU) && (RET == 0)) { \
+	    mtag = _PrdmaTagGet(PREQ); \
+	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
+			ra, la, TOFU_MTU >> 1, FLG); \
+	    ra += (TOFU_MTU >> 1); la += (TOFU_MTU >> 1); \
+	    sz -= (TOFU_MTU >> 1); \
+	} \
+	if ((sz > 0) && (RET == 0)) { \
+	    mtag = _PrdmaTagGet(PREQ); \
+	    RET = FJMPI_Rdma_put((PREQ)->WPEER, mtag, \
+			ra, la, sz, FLG); \
+	    /* ra += sz; la += sz; sz -= sz; */ \
+	} \
+    }
+#endif	/* MOD_PRDMA_MMS_FIX */
 
 #include "prdma.h"
 #ifdef	MOD_PRDMA_LHP_TRC_TIMESYNC
@@ -1571,10 +1600,14 @@ _PrdmaStart0(PrdmaReq *preq)
 #ifdef	MOD_PRDMA_LHP_TRC
 	_PrdmaChangeState(preq, PRDMA_RSTATE_UNKNOWN, 1 /* dosend */);
 #endif	/* MOD_PRDMA_LHP_TRC */
+#ifndef	MOD_PRDMA_MMS_FIX
 	tag = _PrdmaTagGet(preq);
 	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
+#else	/* MOD_PRDMA_MMS_FIX */
+	FJMPI_RDMA_FPUT(preq, flag, cc1);
+#endif	/* MOD_PRDMA_MMS_FIX */
 	/*
 	 * Make sure the ordering of the above transaction and the following
 	 * transaction
@@ -2393,10 +2426,14 @@ _Prdma_Syn_send(PrdmaReq *preq)
 #endif	/* MOD_PRDMA_LHP_TRC */
 	flag = (*_prdma_nic_getf)(preq); /* MOD_PRDMA_NIC_SEL */
 	/* start DMA */
+#ifndef	MOD_PRDMA_MMS_FIX
 	tag = _PrdmaTagGet(preq);
 	cc1 = FJMPI_Rdma_put(preq->WPEER, tag,
 			     preq->raddr, preq->lbaddr,
 			     preq->size, flag);
+#else	/* MOD_PRDMA_MMS_FIX */
+	FJMPI_RDMA_FPUT(preq, flag, cc1);
+#endif	/* MOD_PRDMA_MMS_FIX */
 	/*
 	 * Make sure the ordering of the above transaction and the following
 	 * transaction
