@@ -1,3 +1,23 @@
+0. Overview
+PRDMA is a restricted version of persistent communication in the MPI
+standard in order to carry out better performance.  It assumes that
+all senders and receivers have initiated MPI_Send_init and
+MPI_Recv_init primitives and the same communication patterns are
+reused without reissuing the initialization.  It also assumes that
+MPI_Startall and MPI_Waitall are issued in all participating processes,
+i.e., in th global operation style.
+For example, in stencil computation, all communication patterns are
+fixed during the main computation, and thus before entering the main
+computation, communication patterns can be initialized by
+MPI_Send_init and MPI_Recv_init in all processes, and MPI_Startall and
+MPI_Waitall may be issued during the main computation.
+
+PRDMA does not require the users to modify their source codes if those
+are written using this restricted MPI persistent communication
+feature.  The users just relink their codes with the PRDMA library.
+It replaces MPI functions with ones provided by the PRDMA library.
+
+
 1. To install PRDMA
   $ cd src
   $ make
@@ -31,3 +51,13 @@
        PRDMA_TRACESIZE
        PRDMA_TRACETYPE
        PRDMA_NOTRUNK
+
+
+References:
+[1] Yutaka Ishikawa, Kengo Nakajima, and Atsushi Hori, "Revisiting
+Persistent Communication in MPI," EuroMPI 2012: Recent Advances in the
+Message Passing Interface, LNCS 7490, pp. 296-297, Springer
+Netherlands, 2012 (poster)
+
+[2] Masayuki Hatanaka, Atsuhi Hori, and Yutaka Ishikawa, "Optimization
+of MPI Persistent Communication," Submitted to EuroMPI 2013, 2013.
